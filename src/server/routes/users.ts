@@ -8,6 +8,7 @@ import { idParam, parse } from '../util.js';
 import { logActivity } from '../activity.js';
 
 export const usersRouter = Router();
+usersRouter.get('/lite', requireRole('viewer'), (_req, res) => res.json(db.prepare('SELECT id, name FROM users ORDER BY name').all()));
 usersRouter.use(requireRole('admin'));
 
 const roleSchema = z.enum(['admin', 'editor', 'viewer']);
@@ -36,7 +37,7 @@ usersRouter.patch('/:id', (req, res) => {
   const existing = db.prepare('SELECT id, role FROM users WHERE id = ?').get(id) as { id: number; role: string } | undefined;
   if (!existing) throw notFound('User not found');
   if (body.role && body.role !== 'admin' && existing.role === 'admin') {
-    const admins = (db.prepare("SELECT COUNT(*) AS c FROM users WHERE role = 'admin'").get() as { c: number }).c;
+    const admins = (db.prepare("SELECT COUNT(*) AS c FROM users WHERE role = 'admin'").get() as unknown as { c: number }).c;
     if (admins <= 1) throw badRequest('Cannot demote the last admin');
   }
   const sets: string[] = []; const vals: unknown[] = [];
@@ -57,7 +58,7 @@ usersRouter.delete('/:id', (req, res) => {
   const row = db.prepare('SELECT email, role FROM users WHERE id = ?').get(id) as { email: string; role: string } | undefined;
   if (!row) throw notFound('User not found');
   if (row.role === 'admin') {
-    const admins = (db.prepare("SELECT COUNT(*) AS c FROM users WHERE role = 'admin'").get() as { c: number }).c;
+    const admins = (db.prepare("SELECT COUNT(*) AS c FROM users WHERE role = 'admin'").get() as unknown as { c: number }).c;
     if (admins <= 1) throw badRequest('Cannot delete the last admin');
   }
   db.prepare('DELETE FROM users WHERE id = ?').run(id);

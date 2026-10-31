@@ -1,92 +1,129 @@
 import { Router } from 'express';
-import { db } from '../db.js';
+import path from 'node:path';
+import fs from 'node:fs';
+import { db, UPLOAD_DIR } from '../db.js';
 import { requireRole } from '../auth.js';
+import { notFound } from '../errors.js';
+import { DEVICE_COLS, DEVICE_JOIN, DEVICE_PATH, getPort, tracePort } from '../model.js';
 
 export const miscRouter = Router();
 miscRouter.use(requireRole('viewer'));
 
+miscRouter.get('/files/:uuid', (req, res) => {
+  const f = db.prepare('SELECT * FROM files WHERE uuid = ?').get<{ uuid: string; mime: string; name: string }>(String(req.params.uuid));
+  if (!f) throw notFound('File not found');
+  const p = path.join(UPLOAD_DIR, f.uuid);
+  if (!fs.existsSync(p)) throw notFound('File missing on disk');
+  res.setHeader('Content-Type', f.mime); res.setHeader('Cache-Control', 'private, max-age=86400');
+  fs.createReadStream(p).pipe(res);
+});
+
 miscRouter.get('/search', (req, res) => {
   const q = String(req.query.q ?? '').trim().toUpperCase();
-  if (!q) return res.json({ sites: [], racks: [], devices: [], vlans: [] });
+  if (!q) return res.json([]);
   const like = `%${q}%`;
-  const sites = db.prepare(`SELECT id, code, name FROM sites WHERE UPPER(code) LIKE ? OR UPPER(name) LIKE ? OR UPPER(address) LIKE ? LIMIT 10`).all(like, like, like);
-  const racks = db.prepare(`SELECT r.id, r.code, r.name, s.code AS site_code, ro.code AS room_code FROM racks r JOIN rooms ro ON ro.id = r.room_id JOIN floors f ON f.id = ro.floor_id JOIN sites s ON s.id = f.site_id
-    WHERE UPPER(r.code) LIKE ? OR UPPER(r.name) LIKE ? LIMIT 10`).all(like, like);
-  const devices = db.prepare(`SELECT d.id, d.code, d.name, d.serial, d.ip_address, d.position_u, dt.name AS type_name, r.id AS rack_id, r.code AS rack_code, s.code AS site_code
-    FROM devices d JOIN device_types dt ON dt.id = d.device_type_id JOIN racks r ON r.id = d.rack_id JOIN rooms ro ON ro.id = r.room_id JOIN floors f ON f.id = ro.floor_id JOIN sites s ON s.id = f.site_id
-    WHERE UPPER(d.code) LIKE ? OR UPPER(d.name) LIKE ? OR UPPER(d.serial) LIKE ? OR UPPER(d.ip_address) LIKE ? OR UPPER(d.notes) LIKE ? LIMIT 20`).all(like, like, like, like, like);
-  const vlans = db.prepare(`SELECT v.id, v.vid, v.name, v.site_id, s.code AS site_code FROM vlans v JOIN sites s ON s.id = v.site_id WHERE CAST(v.vid AS TEXT) LIKE ? OR UPPER(v.name) LIKE ? LIMIT 10`).all(like, like);
-  res.json({ sites, racks, devices, vlans });
+  const out: { kind: string; id: number; path: string; name: string; sub: string; to: string }[] = [];
+  for (const l of db.prepare('SELECT id, code, name, address FROM locations WHERE UPPER(code) LIKE ? OR UPPER(name) LIKE ? OR UPPER(address) LIKE ? LIMIT 5').all<{ id: number; code: string; name: string; address: string }>(like, like, like))
+    out.push({ kind: 'Location', id: l.id, path: l.code, name: l.name, sub: l.address, to: `/locations/${l.id}` });
+  for (const f of db.prepare('SELECT f.id, f.code, f.name, l.code AS lc FROM floors f JOIN locations l ON l.id = f.location_id WHERE UPPER(f.code) LIKE ? OR UPPER(f.name) LIKE ? LIMIT 5').all<{ id: number; code: string; name: string; lc: string }>(like, like))
+    out.push({ kind: 'Floor', id: f.id, path: `${f.lc}/${f.code}`, name: f.name, sub: '', to: `/floors/${f.id}` });
+  for (const r of db.prepare('SELECT r.id, r.code, r.name, r.floor_id, l.code AS lc, f.code AS fc FROM rooms r JOIN floors f ON f.id = r.floor_id JOIN locations l ON l.id = f.location_id WHERE UPPER(r.code) LIKE ? OR UPPER(r.name) LIKE ? LIMIT 5').all<{ id: number; code: string; name: string; floor_id: number; lc: string; fc: string }>(like, like))
+    out.push({ kind: 'Room', id: r.id, path: `${r.lc}/${r.fc}/${r.code}`, name: r.name, sub: '', to: `/floors/${r.floor_id}?room=${r.id}` });
+  for (const d of db.prepare(`SELECT d.id, d.name, d.serial, d.rack_id, d.floor_id, dt.name AS type_name, dt.is_rack, ${DEVICE_PATH} AS path ${DEVICE_JOIN}
+      WHERE UPPER(d.code) LIKE ? OR UPPER(d.name) LIKE ? OR UPPER(d.serial) LIKE ? OR UPPER(d.model) LIKE ? OR UPPER(d.manufacturer) LIKE ? LIMIT 15`).all<{ id: number; name: string; serial: string; rack_id: number | null; floor_id: number; type_name: string; is_rack: number; path: string }>(like, like, like, like, like))
+    out.push({ kind: d.is_rack ? 'Rack' : d.rack_id ? 'Rack device' : 'Device', id: d.id, path: d.path, name: d.name, sub: d.type_name + (d.serial ? ` · SN ${d.serial}` : ''), to: d.is_rack ? `/racks/${d.id}` : d.rack_id ? `/racks/${d.rack_id}?device=${d.id}` : `/floors/${d.floor_id}?device=${d.id}` });
+  for (const v of db.prepare('SELECT id, vid, name FROM vlans WHERE CAST(vid AS TEXT) LIKE ? OR UPPER(name) LIKE ? LIMIT 5').all<{ id: number; vid: number; name: string }>(like, like))
+    out.push({ kind: 'VLAN', id: v.id, path: `VLAN ${v.vid}`, name: v.name, sub: '', to: `/networks/vlans` });
+  for (const w of db.prepare('SELECT id, ssid, name FROM wlans WHERE UPPER(ssid) LIKE ? OR UPPER(name) LIKE ? LIMIT 5').all<{ id: number; ssid: string; name: string }>(like, like))
+    out.push({ kind: 'WLAN', id: w.id, path: w.ssid, name: w.name, sub: '', to: `/networks/wlans` });
+  res.json(out);
 });
 
 miscRouter.get('/activity', (req, res) => {
-  const limit = Math.min(Number(req.query.limit ?? 50), 500);
-  const offset = Math.max(Number(req.query.offset ?? 0), 0);
+  const limit = Math.min(Number(req.query.limit ?? 50), 500); const offset = Math.max(Number(req.query.offset ?? 0), 0);
   const q = String(req.query.q ?? '').trim().toUpperCase();
-  const rows = db.prepare(`SELECT * FROM activity_log WHERE (? = '' OR UPPER(entity_label || ' ' || user_name || ' ' || action || ' ' || entity_type) LIKE '%' || ? || '%')
-    ORDER BY id DESC LIMIT ? OFFSET ?`).all(q, q, limit, offset) as { details: string }[];
-  const total = (db.prepare(`SELECT COUNT(*) AS c FROM activity_log WHERE (? = '' OR UPPER(entity_label || ' ' || user_name || ' ' || action || ' ' || entity_type) LIKE '%' || ? || '%')`).get(q, q) as { c: number }).c;
+  const action = String(req.query.action ?? ''); const type = String(req.query.entity_type ?? ''); const user = String(req.query.user ?? '');
+  const from = String(req.query.from ?? ''); const to = String(req.query.to ?? '');
+  const where = `(? = '' OR UPPER(entity_label) LIKE '%' || ? || '%') AND (? = '' OR action = ?) AND (? = '' OR entity_type = ?) AND (? = '' OR user_name = ?) AND (? = '' OR created_at >= ?) AND (? = '' OR created_at <= ? || ' 23:59:59')`;
+  const args = [q, q, action, action, type, type, user, user, from, from, to, to];
+  const rows = db.prepare(`SELECT * FROM activity_log WHERE ${where} ORDER BY id DESC LIMIT ? OFFSET ?`).all<{ details: string }>(...args, limit, offset);
+  const total = db.prepare(`SELECT COUNT(*) AS c FROM activity_log WHERE ${where}`).get<{ c: number }>(...args)!.c;
   res.json({ total, rows: rows.map((r) => ({ ...r, details: JSON.parse(r.details) })) });
 });
-
-miscRouter.get('/stats', (_req, res) => {
-  const one = (sql: string) => (db.prepare(sql).get() as { c: number }).c;
+miscRouter.get('/activity/filters', (_req, res) => {
   res.json({
-    sites: one('SELECT COUNT(*) AS c FROM sites'), racks: one('SELECT COUNT(*) AS c FROM racks'),
-    devices: one('SELECT COUNT(*) AS c FROM devices'), connections: one('SELECT COUNT(*) AS c FROM connections'),
-    vlans: one('SELECT COUNT(*) AS c FROM vlans'),
+    actions: db.prepare('SELECT DISTINCT action FROM activity_log ORDER BY action').all<{ action: string }>().map((r) => r.action),
+    types: db.prepare('SELECT DISTINCT entity_type FROM activity_log ORDER BY entity_type').all<{ entity_type: string }>().map((r) => r.entity_type),
+    users: db.prepare('SELECT DISTINCT user_name FROM activity_log ORDER BY user_name').all<{ user_name: string }>().map((r) => r.user_name),
   });
 });
 
-function csv(rows: Record<string, unknown>[], columns: string[]): string {
-  const esc = (v: unknown) => {
-    const s = v === null || v === undefined ? '' : String(v);
-    return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-  };
-  return [columns.join(','), ...rows.map((r) => columns.map((c) => esc(r[c])).join(','))].join('\r\n') + '\r\n';
-}
-
-const EXPORTS: Record<string, { sql: string; columns: string[] }> = {
-  racks: {
-    sql: `SELECT s.code AS site, f.code AS floor, ro.code AS room, r.code AS rack, r.name, r.height_u,
-      (SELECT COUNT(*) FROM devices d WHERE d.rack_id = r.id) AS devices,
-      (SELECT COALESCE(SUM(dt.height_u),0) FROM devices d JOIN device_types dt ON dt.id = d.device_type_id WHERE d.rack_id = r.id) AS used_u, r.notes
-      FROM racks r JOIN rooms ro ON ro.id = r.room_id JOIN floors f ON f.id = ro.floor_id JOIN sites s ON s.id = f.site_id ORDER BY s.code, f.code, ro.code, r.code`,
-    columns: ['site', 'floor', 'room', 'rack', 'name', 'height_u', 'devices', 'used_u', 'notes'],
-  },
-  devices: {
-    sql: `SELECT s.code AS site, r.code AS rack, d.code AS device, d.name, dt.name AS type, dt.category, dt.manufacturer, dt.model, d.position_u, dt.height_u, d.serial, d.ip_address, d.notes
-      FROM devices d JOIN device_types dt ON dt.id = d.device_type_id JOIN racks r ON r.id = d.rack_id JOIN rooms ro ON ro.id = r.room_id JOIN floors f ON f.id = ro.floor_id JOIN sites s ON s.id = f.site_id
-      ORDER BY s.code, r.code, d.position_u DESC`,
-    columns: ['site', 'rack', 'device', 'name', 'type', 'category', 'manufacturer', 'model', 'position_u', 'height_u', 'serial', 'ip_address', 'notes'],
-  },
-  ports: {
-    sql: `SELECT s.code AS site, r.code AS rack, d.code AS device, p.face, p.name AS port, p.kind, v.vid AS vlan, p.notes,
-      (SELECT d2.code || ':' || p2.name FROM connections c JOIN ports p2 ON p2.id = CASE WHEN c.port_a_id = p.id THEN c.port_b_id ELSE c.port_a_id END JOIN devices d2 ON d2.id = p2.device_id WHERE c.port_a_id = p.id OR c.port_b_id = p.id) AS connected_to
-      FROM ports p JOIN devices d ON d.id = p.device_id LEFT JOIN vlans v ON v.id = p.vlan_id JOIN racks r ON r.id = d.rack_id JOIN rooms ro ON ro.id = r.room_id JOIN floors f ON f.id = ro.floor_id JOIN sites s ON s.id = f.site_id
-      ORDER BY s.code, r.code, d.position_u DESC, p.face, p.sort`,
-    columns: ['site', 'rack', 'device', 'face', 'port', 'kind', 'vlan', 'connected_to', 'notes'],
-  },
-  connections: {
-    sql: `SELECT sa.code AS a_site, ra.code AS a_rack, da.code AS a_device, pa.face AS a_face, pa.name AS a_port,
-      sb.code AS b_site, rb.code AS b_rack, db2.code AS b_device, pb.face AS b_face, pb.name AS b_port, c.cable_type, c.color, c.label, c.length_m, c.notes
-      FROM connections c
-      JOIN ports pa ON pa.id = c.port_a_id JOIN devices da ON da.id = pa.device_id JOIN racks ra ON ra.id = da.rack_id JOIN rooms roa ON roa.id = ra.room_id JOIN floors fa ON fa.id = roa.floor_id JOIN sites sa ON sa.id = fa.site_id
-      JOIN ports pb ON pb.id = c.port_b_id JOIN devices db2 ON db2.id = pb.device_id JOIN racks rb ON rb.id = db2.rack_id JOIN rooms rob ON rob.id = rb.room_id JOIN floors fb ON fb.id = rob.floor_id JOIN sites sb ON sb.id = fb.site_id
-      ORDER BY sa.code, ra.code, da.code, pa.sort`,
-    columns: ['a_site', 'a_rack', 'a_device', 'a_face', 'a_port', 'b_site', 'b_rack', 'b_device', 'b_face', 'b_port', 'cable_type', 'color', 'label', 'length_m', 'notes'],
-  },
-  vlans: {
-    sql: `SELECT s.code AS site, v.vid, v.name, v.description, (SELECT COUNT(*) FROM ports p WHERE p.vlan_id = v.id) AS ports FROM vlans v JOIN sites s ON s.id = v.site_id ORDER BY s.code, v.vid`,
-    columns: ['site', 'vid', 'name', 'description', 'ports'],
-  },
+// ---------- Resources ----------
+const RES: Record<string, string> = {
+  locations: `SELECT l.id, l.code AS path, l.name, l.address, l.lat, l.lng, u.name AS responsible, (SELECT COUNT(*) FROM floors f WHERE f.location_id = l.id) AS floors,
+    (SELECT COUNT(*) FROM rooms r JOIN floors f ON f.id = r.floor_id WHERE f.location_id = l.id) AS rooms, (SELECT COUNT(*) FROM devices d JOIN floors f ON f.id = d.floor_id WHERE f.location_id = l.id) AS devices, l.created_at, l.updated_at
+    FROM locations l LEFT JOIN users u ON u.id = l.responsible_user_id ORDER BY l.code`,
+  floors: `SELECT f.id, l.code || '/' || f.code AS path, f.name, f.level, l.code AS location, l.id AS location_id, u.name AS responsible, (SELECT COUNT(*) FROM rooms r WHERE r.floor_id = f.id) AS rooms,
+    (SELECT COUNT(*) FROM devices d WHERE d.floor_id = f.id) AS devices, CASE WHEN f.plan_file_id IS NULL THEN 'no' ELSE 'yes' END AS floor_plan, f.created_at, f.updated_at
+    FROM floors f JOIN locations l ON l.id = f.location_id LEFT JOIN users u ON u.id = f.responsible_user_id ORDER BY l.code, f.level`,
+  rooms: `SELECT r.id, l.code || '/' || f.code || '/' || r.code AS path, r.name, l.code AS location, l.id AS location_id, l.code || '/' || f.code AS floor, f.id AS floor_id, u.name AS responsible,
+    (SELECT COUNT(*) FROM devices d WHERE d.room_id = r.id AND d.rack_id IS NULL) AS devices, r.created_at, r.updated_at
+    FROM rooms r JOIN floors f ON f.id = r.floor_id JOIN locations l ON l.id = f.location_id LEFT JOIN users u ON u.id = r.responsible_user_id ORDER BY path`,
+  devices: `SELECT d.id, ${DEVICE_PATH} AS path, d.name, l.code AS location, l.id AS location_id, l.code || '/' || f.code AS floor, f.id AS floor_id, l.code || '/' || f.code || '/' || COALESCE(ro.code, 'DEFAULT') AS room, ro.id AS room_id,
+    rk.code AS rack, d.rack_id, dt.name AS device_type, d.manufacturer, d.model, d.serial, d.purchase_date, d.operation_start, ru.name AS responsible,
+    (SELECT COUNT(*) FROM ports p WHERE p.device_id = d.id) AS ports,
+    (SELECT COUNT(DISTINCT p.id) FROM ports p JOIN connections c ON c.port_a_id = p.id OR c.port_b_id = p.id WHERE p.device_id = d.id) AS connected_ports,
+    d.created_at, d.updated_at ${DEVICE_JOIN} ORDER BY path`,
+  ports: `SELECT p.id, ${DEVICE_PATH} || '/' || p.name AS path, p.name, p.kind, p.face, p.wireless_mode, ${DEVICE_PATH} AS device, d.id AS device_id, d.rack_id, d.floor_id, dt.name AS device_type, v.vid AS vlan, w.ssid AS wlan, p.speed,
+    (SELECT COUNT(*) FROM connections c WHERE (c.port_a_id = p.id OR c.port_b_id = p.id) AND c.type = 'building') AS building, (SELECT COUNT(*) FROM connections c WHERE (c.port_a_id = p.id OR c.port_b_id = p.id) AND c.type = 'user') AS user_conn
+    FROM ports p LEFT JOIN vlans v ON v.id = p.vlan_id LEFT JOIN wlans w ON w.id = p.wlan_id JOIN devices d ON d.id = p.device_id JOIN device_types dt ON dt.id = d.device_type_id LEFT JOIN rooms ro ON ro.id = d.room_id JOIN floors f ON f.id = d.floor_id JOIN locations l ON l.id = f.location_id LEFT JOIN devices rk ON rk.id = d.rack_id ORDER BY path`,
 };
-
-miscRouter.get('/export/:what.csv', (req, res) => {
-  const spec = EXPORTS[req.params.what as string];
-  if (!spec) return res.status(404).json({ error: 'Unknown export' });
-  const rows = db.prepare(spec.sql).all() as Record<string, unknown>[];
-  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-  res.setHeader('Content-Disposition', `attachment; filename="rackdocs-${req.params.what}-${new Date().toISOString().slice(0, 10)}.csv"`);
-  res.send(csv(rows, spec.columns));
+miscRouter.get('/resources/:tab', (req, res) => {
+  const tab = String(req.params.tab);
+  if (tab === 'connections') {
+    const rows = db.prepare('SELECT * FROM connections ORDER BY id DESC').all<{ id: number; port_a_id: number; port_b_id: number; type: string; color: string; label: string; cable_type: string; length_m: number | null; created_at: string }>();
+    return res.json(rows.map((c) => { const a = getPort(c.port_a_id); const b = getPort(c.port_b_id); const t = tracePort(c.port_a_id);
+      return { id: c.id, path: `${a.path} ⇄ ${b.path}`, from: a.path, to: b.path, type: c.type, color: c.color, label: c.label, cable_type: c.cable_type, length_m: c.length_m, complete: t.complete ? 'yes' : 'no', chain_from: t.steps[0].port.path, chain_to: t.steps[t.steps.length - 1].port.path, a_device_id: a.device_id, a_rack_id: a.rack_id, a_floor_id: a.floor_id, created_at: c.created_at }; }));
+  }
+  const sql = RES[tab];
+  if (!sql) throw notFound('Unknown resource tab');
+  res.json(db.prepare(sql).all());
 });
+
+function csv(rows: Record<string, unknown>[]): string {
+  if (!rows.length) return '';
+  const cols = Object.keys(rows[0]);
+  const esc = (v: unknown) => { const s = v === null || v === undefined ? '' : String(v); return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+  return [cols.join(','), ...rows.map((r) => cols.map((c) => esc(r[c])).join(','))].join('\r\n') + '\r\n';
+}
+miscRouter.get('/export/:tab.csv', (req, res) => {
+  const tab = String(req.params.tab);
+  let rows: Record<string, unknown>[];
+  if (tab === 'connections') {
+    rows = db.prepare('SELECT * FROM connections ORDER BY id').all<{ port_a_id: number; port_b_id: number; type: string; color: string; label: string; cable_type: string; length_m: number | null; notes: string }>()
+      .map((c) => { const t = tracePort(c.port_a_id); return { from: getPort(c.port_a_id).path, to: getPort(c.port_b_id).path, type: c.type, color: c.color, label: c.label, cable_type: c.cable_type, length_m: c.length_m, chain_from: t.steps[0].port.path, chain_to: t.steps[t.steps.length - 1].port.path, complete: t.complete ? 'yes' : 'no', notes: c.notes }; });
+  } else if (tab === 'activity') {
+    rows = db.prepare('SELECT created_at, user_name, action, entity_type, entity_label, details FROM activity_log ORDER BY id DESC').all();
+  } else if (tab === 'vlans') {
+    rows = db.prepare('SELECT vid, name, description, (SELECT COUNT(*) FROM ports p WHERE p.vlan_id = vlans.id) AS ports FROM vlans ORDER BY vid').all();
+  } else if (tab === 'wlans') {
+    rows = db.prepare('SELECT ssid, name, security, description, (SELECT COUNT(*) FROM ports p WHERE p.wlan_id = wlans.id) AS ports FROM wlans ORDER BY ssid').all();
+  } else if (tab === 'racks') {
+    rows = db.prepare(`SELECT ${DEVICE_PATH} AS path, d.name, l.code AS location, f.code AS floor, COALESCE(ro.code, 'DEFAULT') AS room, d.height_u AS rack_units, (SELECT COUNT(*) FROM devices c WHERE c.rack_id = d.id) AS devices, d.manufacturer, d.model, d.serial, d.notes ${DEVICE_JOIN} WHERE dt.is_rack = 1 ORDER BY path`).all();
+  } else {
+    const sql = RES[tab]; if (!sql) throw notFound('Unknown export');
+    rows = db.prepare(sql).all();
+    for (const r of rows) for (const k of Object.keys(r)) if (/_id$/.test(k) || k === 'id') delete r[k];
+  }
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="rackdocs-${tab}-${new Date().toISOString().slice(0, 10)}.csv"`);
+  res.send(csv(rows));
+});
+
+miscRouter.get('/stats', (_req, res) => {
+  const one = (sql: string) => db.prepare(sql).get<{ c: number }>()!.c;
+  res.json({ locations: one('SELECT COUNT(*) AS c FROM locations'), floors: one('SELECT COUNT(*) AS c FROM floors'), rooms: one('SELECT COUNT(*) AS c FROM rooms'),
+    devices: one('SELECT COUNT(*) AS c FROM devices'), racks: one('SELECT COUNT(*) AS c FROM devices d JOIN device_types dt ON dt.id = d.device_type_id WHERE dt.is_rack = 1'),
+    connections: one('SELECT COUNT(*) AS c FROM connections'), vlans: one('SELECT COUNT(*) AS c FROM vlans'), wlans: one('SELECT COUNT(*) AS c FROM wlans') });
+});
+void DEVICE_COLS;

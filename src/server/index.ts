@@ -9,11 +9,11 @@ import { purgeExpiredSessions, sessionMiddleware } from './auth.js';
 import { HttpError } from './errors.js';
 import { authRouter } from './routes/auth.js';
 import { usersRouter } from './routes/users.js';
-import { sitesRouter } from './routes/sites.js';
-import { deviceTypesRouter } from './routes/deviceTypes.js';
+import { locationsRouter } from './routes/locations.js';
 import { devicesRouter } from './routes/devices.js';
 import { connectionsRouter } from './routes/connections.js';
-import { vlansRouter } from './routes/vlans.js';
+import { networksRouter } from './routes/networks.js';
+import { libraryRouter } from './routes/library.js';
 import { miscRouter } from './routes/misc.js';
 
 const app = express();
@@ -24,15 +24,14 @@ app.use(sessionMiddleware);
 
 app.use('/api', authRouter);
 app.use('/api/users', usersRouter);
-app.use('/api', sitesRouter);
-app.use('/api/device-types', deviceTypesRouter);
+app.use('/api', locationsRouter);
 app.use('/api', devicesRouter);
-app.use('/api/connections', connectionsRouter);
-app.use('/api', vlansRouter);
+app.use('/api', connectionsRouter);
+app.use('/api', networksRouter);
+app.use('/api', libraryRouter);
 app.use('/api', miscRouter);
 app.use('/api', (_req, res) => res.status(404).json({ error: 'Not found' }));
 
-// Static web app (production build)
 const here = path.dirname(fileURLToPath(import.meta.url));
 const webDir = path.resolve(here, '../web');
 if (fs.existsSync(path.join(webDir, 'index.html'))) {
@@ -46,10 +45,11 @@ app.use((err: unknown, _req: express.Request, res: express.Response, _next: expr
   const msg = e.message ?? '';
   if (/UNIQUE constraint failed/.test(msg)) {
     const field = msg.split(':').pop()?.trim() ?? '';
-    return res.status(409).json({ error: `Already exists: ${field.replace(/\w+\./g, '')}` });
+    return res.status(409).json({ error: `Already exists: ${field.replace(/\w+\./g, '').replace(/COALESCE\(room_id, 0\)/, 'room')}` });
   }
   if (e.name === 'SQLite3Error' && /constraint failed/i.test(msg)) return res.status(409).json({ error: msg });
   if (e.type === 'entity.parse.failed') return res.status(400).json({ error: 'Invalid JSON' });
+  if (e.type === 'entity.too.large') return res.status(413).json({ error: 'File is too large' });
   console.error(err);
   res.status(500).json({ error: 'Internal error' });
 });
@@ -67,10 +67,7 @@ function shutdown(signal: string) {
   console.log(`${signal} received, shutting down`);
   const timer = setTimeout(() => { console.error('Shutdown timed out, forcing exit'); process.exit(1); }, 3000);
   timer.unref();
-  server.close(() => {
-    try { db.close(); } catch (e) { console.error('Error closing database', e); }
-    process.exit(0);
-  });
+  server.close(() => { try { db.close(); } catch (e) { console.error('Error closing database', e); } process.exit(0); });
   server.closeAllConnections();
 }
 for (const sig of ['SIGINT', 'SIGTERM'] as const) process.on(sig, () => shutdown(sig));

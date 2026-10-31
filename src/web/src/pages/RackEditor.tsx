@@ -1,397 +1,204 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { Link, useParams, useSearchParams } from 'react-router-dom';
+import { useEffect, useMemo, useRef, useState, type PointerEvent as RPointerEvent } from 'react';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { api } from '../lib/api';
+import { ZoomIn, ZoomOut, Maximize, EyeOff, Eye, Keyboard, BookOpen, Search, MoreVertical, Scan, PanelBottom, Undo2, Redo2, X } from 'lucide-react';
+import { api, fmtDate } from '../lib/api';
 import { useCanEdit } from '../lib/auth';
-import type { ConnectionRow, Device, DeviceType, Port, PortSearchRow, RackDetail, Trace } from '../lib/types';
-import { Badge, Confirm, Dialog, ErrorBox, Field, Form, Loading, errMsg, useToast } from '../components/ui';
-import { ConnectionsTable, cssColor } from './Connections';
-import { RackForm } from './SiteDetail';
+import type { Connection, Device, DeviceDetail, Port, RackDetail, Template, Vlan } from '../lib/types';
+import { usePageHeader } from '../components/Shell';
+import { Confirm, Dialog, ErrorBox, Field, Form, IconBtn, Loading, Menu, SaveStatus, Tabs, errMsg, useToast } from '../components/ui';
+import { ConnectionsTable, DeviceSettings, useTypes } from '../components/editor';
+import { ShortcutsHelp } from './LocationView';
+import { panelLayout } from './DeviceLibrary';
+import { zoomAt, type View } from '../components/canvas';
 
-const UH = 20; // px per rack unit
-const PAD = 8; const GUTTER = 34; const RAIL = 10; const W = 360;
+const UH = 24; const RW = 520; const LEFT = 70; const RAIL = 14; const PAD = 16; const PAD_TOP = 60; const GUT = 80;
 type Face = 'front' | 'rear';
+type RackDevice = Device & { ports: Port[] };
 
 export function RackEditor() {
-  const id = Number(useParams().id);
-  const qc = useQueryClient(); const toast = useToast(); const canEdit = useCanEdit();
-  const [params, setParams] = useSearchParams();
+  const id = Number(useParams().id); const nav = useNavigate(); const qc = useQueryClient(); const toast = useToast(); const canEdit = useCanEdit();
+  const [sp, setSp] = useSearchParams();
   const q = useQuery({ queryKey: ['rack', id], queryFn: () => api.get<RackDetail>(`/racks/${id}`) });
-  const [face, setFace] = useState<Face>('front');
-  const [selected, setSelected] = useState<number | null>(params.get('device') ? Number(params.get('device')) : null);
-  const [selectedPort, setSelectedPort] = useState<number | null>(null);
-  const [tab, setTab] = useState<'device' | 'connections'>('device');
-  const [modal, setModal] = useState<null | { kind: 'add'; position: number } | { kind: 'editDevice'; device: Device } | { kind: 'deleteDevice'; device: Device } | { kind: 'editRack' } | { kind: 'connect'; port: Port } | { kind: 'trace'; port: Port } | { kind: 'move'; device: Device }>(null);
-  const refresh = () => Promise.all([qc.invalidateQueries({ queryKey: ['rack', id] }), qc.invalidateQueries({ queryKey: ['connections'] }), qc.invalidateQueries({ queryKey: ['racks'] })]);
+  const tpls = useQuery({ queryKey: ['templates'], queryFn: () => api.get<Template[]>('/templates') }); const types = useTypes();
+  const conns = useQuery({ queryKey: ['connections', 'rack', id], queryFn: () => api.get<Connection[]>(`/connections?rack_id=${id}`) });
+  const [face, setFace] = useState<Face>('front'); const [selDev, setSelDev] = useState<number | null>(null); const [selPort, setSelPort] = useState<number | null>(null);
+  const [view, setView] = useState<View>({ k: 1, tx: 0, ty: 0 }); const [fitMode, setFitMode] = useState<'height' | 'width'>('height');
+  const [panelsHidden, setPanelsHidden] = useState(false); const [sidebarHidden, setSidebarHidden] = useState(false); const [bottomOpen, setBottomOpen] = useState(false); const [bottomTab, setBottomTab] = useState('devices'); const [connFilter, setConnFilter] = useState('all');
+  const [hlVlan, setHlVlan] = useState<Vlan | null>(null); const [hoverChain, setHoverChain] = useState<Set<number> | null>(null);
+  const [status, setStatus] = useState<'saved' | 'saving' | 'error'>('saved');
+  const [modal, setModal] = useState<null | { kind: 'add'; position: number; templateId?: number } | { kind: 'delDev'; dev: RackDevice } | { kind: 'disc'; port: Port } | { kind: 'shortcuts' } | { kind: 'delRack' }>(null);
+  const refresh = () => Promise.all([qc.invalidateQueries({ queryKey: ['rack', id] }), qc.invalidateQueries({ queryKey: ['connections'] }), qc.invalidateQueries({ queryKey: ['device'] }), qc.invalidateQueries({ queryKey: ['racks'] }), qc.invalidateQueries({ queryKey: ['floor-view'] })]);
+  useEffect(() => { const d = sp.get('device'); if (d) { setSelDev(Number(d)); sp.delete('device'); setSp(sp, { replace: true }); } }, [sp, setSp]);
+  const rack = q.data;
+  usePageHeader({ title: rack?.name || rack?.code || '…', crumbs: [{ label: 'Locations', to: '/locations' }, { label: rack?.location_code ?? '', to: `/locations/${rack?.location_id}` }, { label: rack?.floor_code ?? '', to: `/floors/${rack?.floor_id}` }, { label: rack?.code ?? '' }], full: true,
+    actions: <><IconBtn title={sidebarHidden ? 'Show settings sidebar' : 'Hide settings sidebar'} onClick={() => setSidebarHidden(!sidebarHidden)}>{sidebarHidden ? <Eye size={15} /> : <EyeOff size={15} />}</IconBtn><IconBtn title="Keyboard shortcuts" onClick={() => setModal({ kind: 'shortcuts' })}><Keyboard size={15} /></IconBtn><a className="icon-btn" href="https://github.com/damiankw/patching#readme" target="_blank" rel="noreferrer" title="Documentation"><BookOpen size={15} /></a></> }, [rack?.id, rack?.name, sidebarHidden]);
+  const selectedDevice = rack?.devices.find((d) => d.id === selDev) ?? null;
+  const selectedPort = selectedDevice?.ports.find((p) => p.id === selPort) ?? null;
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement; if (['INPUT', 'TEXTAREA', 'SELECT'].includes(t.tagName)) return;
+      const mod = e.metaKey || e.ctrlKey;
+      if (mod && e.key.toLowerCase() === 'h') { e.preventDefault(); setPanelsHidden((v) => !v); }
+      if ((e.key === 'Backspace' || e.key === 'Delete') && selectedPort?.user_peer && canEdit) { e.preventDefault(); setModal({ kind: 'disc', port: selectedPort }); }
+      if (e.key === 'Escape') { setHlVlan(null); }
+    };
+    window.addEventListener('keydown', h); return () => window.removeEventListener('keydown', h);
+  }, [selectedPort, canEdit]);
+  const act = async (fn: () => Promise<unknown>) => { setStatus('saving'); try { await fn(); await refresh(); setStatus('saved'); } catch (e) { setStatus('error'); toast(errMsg(e), 'error'); } };
+  if (q.isLoading || !rack) return q.error ? <ErrorBox error={q.error} /> : <Loading />;
+  const portById = new Map<number, { port: Port; dev: RackDevice }>(); for (const d of rack.devices) for (const p of d.ports) portById.set(p.id, { port: p, dev: d });
+  const vlanPorts = hlVlan ? new Set(rack.devices.flatMap((d) => d.ports.filter((p) => p.vlan_id === hlVlan.id).map((p) => p.id))) : null;
+  const connRows = (conns.data ?? []).filter((c) => connFilter === 'all' || (connFilter === 'in' ? c.a.rack_id === id && c.b.rack_id === id : c.a.rack_id !== id || c.b.rack_id !== id));
 
-  useEffect(() => { if (params.get('device')) { setSelected(Number(params.get('device'))); params.delete('device'); setParams(params, { replace: true }); } }, [params, setParams]);
-
-  if (q.isLoading) return <Loading />;
-  if (q.error) return <ErrorBox error={q.error} />;
-  const rack = q.data!;
-  const device = rack.devices.find((d) => d.id === selected) ?? null;
-  const port = device?.ports.find((p) => p.id === selectedPort) ?? null;
-
-  const onDrop = async (d: Device, newU: number) => {
-    if (newU === d.position_u) return;
-    try { await api.patch(`/devices/${d.id}`, { position_u: newU }); await refresh(); }
-    catch (e) { toast(errMsg(e), 'error'); }
-  };
-
-  return (
-    <div>
-      <div className="breadcrumb"><Link to="/">Sites</Link> / <Link to={`/sites/${rack.site_id}`}>{rack.site_code}</Link> / {rack.floor_code} / {rack.room_code} / <span className="code">{rack.code}</span></div>
-      <div className="page-head">
-        <div><h1><span className="code">{rack.code}</span> {rack.name}</h1><div className="muted">{rack.site_name} · {rack.floor_name} · {rack.room_name} · {rack.height_u}U · {rack.devices.length} devices</div></div>
-        <div className="btn-row">
-          {canEdit && <button className="btn btn-primary" onClick={() => setModal({ kind: 'add', position: firstFree(rack, 1) })}>+ Add device</button>}
-          {canEdit && <button className="btn" onClick={() => setModal({ kind: 'editRack' })}>Edit rack</button>}
+  return <div className={`editor wide-editor${sidebarHidden ? ' sidebar-hidden' : ''}`}>
+    <div className="editor-body">
+      {!panelsHidden && <TemplatePalette templates={tpls.data ?? []} canEdit={canEdit} />}
+      {!panelsHidden && <div className="palette-rail"><span className="rail-label">DEVICES</span></div>}
+      <div className="canvas-area">
+        <div style={{ flex: 1, position: 'relative', minHeight: 0 }}>
+          <div className="tool-col"><IconBtn title="Zoom in" onClick={() => setView(zoomAt(view, 1.25, RW / 2, 0))}><ZoomIn size={15} /></IconBtn><IconBtn title="Zoom out" onClick={() => setView(zoomAt(view, 0.8, RW / 2, 0))}><ZoomOut size={15} /></IconBtn><IconBtn title="Reset zoom and position" onClick={() => setView({ k: 1, tx: 0, ty: 0 })}><Scan size={15} /></IconBtn><IconBtn title={fitMode === 'height' ? 'Fit to width' : 'Fit to height'} onClick={() => { setFitMode(fitMode === 'height' ? 'width' : 'height'); setView({ k: 1, tx: 0, ty: 0 }); }}><Maximize size={15} /></IconBtn><div className="tool-sep" /><IconBtn title="Undo (not available)" disabled><Undo2 size={15} /></IconBtn><IconBtn title="Redo (not available)" disabled><Redo2 size={15} /></IconBtn></div>
+          <div className="canvas-topcenter" style={{ left: 70, transform: 'none' }}><div className="seg"><button className={face === 'front' ? 'active' : ''} onClick={() => setFace('front')}>Front</button><button className={face === 'rear' ? 'active' : ''} onClick={() => setFace('rear')}>Back</button></div></div>
+          <div className="canvas-topright">{hlVlan && <span className="vlan-pill">VLAN {hlVlan.vid} · {hlVlan.name} · {vlanPorts?.size} ports<button onClick={() => setHlVlan(null)}><X size={12} /></button></span>}<SaveStatus status={status} /></div>
+          <RackCanvas rack={rack} face={face} view={view} setView={setView} fitMode={fitMode} selDev={selDev} selPort={selPort} canEdit={canEdit} hoverChain={hoverChain} setHoverChain={setHoverChain} vlanPorts={vlanPorts} conns={conns.data ?? []}
+            onSelectDevice={(d) => { setSelDev(d); setSelPort(null); }} onSelectPort={(dev, p) => { setSelDev(dev); setSelPort(p); }} onEmptyClick={(u) => canEdit && setModal({ kind: 'add', position: u })}
+            onDropTemplate={(tplId, u) => setModal({ kind: 'add', position: u, templateId: tplId })} onMoveDevice={(devId, u) => act(() => api.patch(`/devices/${devId}`, { position_u: u }))}
+            onConnect={(a, b) => act(() => api.post('/connections', { port_a_id: a, port_b_id: b, type: 'user' }))} onClearVlan={() => setHlVlan(null)} />
         </div>
+        {!panelsHidden && <div className="bottom-panel">
+          <div className="bottom-head" onClick={() => setBottomOpen(!bottomOpen)}><PanelBottom size={14} /><span>DEVICES & CONNECTIONS</span>{bottomOpen && <span onClick={(e) => e.stopPropagation()}><Tabs pill tabs={[{ id: 'devices', label: 'DEVICES' }, { id: 'connections', label: 'CONNECTIONS' }, { id: 'vlans', label: 'VLANS' }]} value={bottomTab} onChange={setBottomTab} /></span>}<span className="grow" /></div>
+          {bottomOpen && <div className="bottom-body">
+            {bottomTab === 'devices' && <table className="table"><thead><tr><th>ID</th><th>Name</th><th>Side</th><th>Unit</th><th>Type</th><th>Template</th><th>Created</th></tr></thead><tbody>{rack.devices.map((d) => <tr key={d.id} style={{ cursor: 'pointer' }} onClick={() => { setSelDev(d.id); setSelPort(null); }}><td className="code">{d.code}</td><td>{d.name || <span className="muted">-</span>}</td><td>{d.ports.some((p) => p.face === 'rear') && !d.ports.some((p) => p.face === 'front') ? 'Back' : 'Front'}</td><td>{d.position_u}</td><td>{d.type_name}</td><td className="muted">{d.template_name}</td><td>{fmtDate(d.created_at)}</td></tr>)}{rack.devices.length === 0 && <tr><td colSpan={7} className="muted" style={{ textAlign: 'center', padding: 18 }}>Drag a device from the left or click an empty rack unit.</td></tr>}</tbody></table>}
+            {bottomTab === 'connections' && <><div className="chip-tabs" style={{ padding: 6 }}><button className={connFilter === 'all' ? 'active' : ''} onClick={() => setConnFilter('all')}>All</button><button className={connFilter === 'in' ? 'active' : ''} onClick={() => setConnFilter('in')}>Within rack</button><button className={connFilter === 'out' ? 'active' : ''} onClick={() => setConnFilter('out')}>Leaving rack</button></div><ConnectionsTable rows={connRows} /></>}
+            {bottomTab === 'vlans' && <table className="table"><thead><tr><th>VID</th><th>Name</th><th>Ports in this rack</th><th /></tr></thead><tbody>{rack.vlans.map((v) => <tr key={v.id} style={{ cursor: 'pointer' }} className={hlVlan?.id === v.id ? 'active' : ''} onClick={() => setHlVlan(hlVlan?.id === v.id ? null : v)}><td className="code">{v.vid}</td><td>{v.name}</td><td>{v.port_count}</td><td className="right"><Link to="/networks/vlans" className="small">All ports</Link></td></tr>)}{rack.vlans.length === 0 && <tr><td colSpan={4} className="muted" style={{ textAlign: 'center', padding: 18 }}>No VLANs assigned on this rack's ports yet. Select a switch port and pick a VLAN in the sidebar.</td></tr>}</tbody></table>}
+          </div>}
+        </div>}
       </div>
-      {rack.notes && <p className="notes">{rack.notes}</p>}
-      <div className="rack-page">
-        <div className="rack-canvas-wrap">
-          <div className="rack-toolbar">
-            <div className="seg"><button className={face === 'front' ? 'active' : ''} onClick={() => setFace('front')}>Front</button><button className={face === 'rear' ? 'active' : ''} onClick={() => setFace('rear')}>Rear</button></div>
-            <span className="muted small">{canEdit ? 'Drag devices to move. Click an empty slot to add.' : 'Read only'}</span>
-          </div>
-          <RackSvg rack={rack} face={face} selected={selected} canEdit={canEdit}
-            onSelect={(d) => { setSelected(d); setSelectedPort(null); setTab('device'); }}
-            onDrop={onDrop} onEmptyClick={(u) => canEdit && setModal({ kind: 'add', position: u })} />
-        </div>
-        <div className="side-panel">
-          <div className="tabs"><button className={tab === 'device' ? 'active' : ''} onClick={() => setTab('device')}>Device</button><button className={tab === 'connections' ? 'active' : ''} onClick={() => setTab('connections')}>Rack connections</button></div>
-          {tab === 'connections' && <RackConnections rackId={id} />}
-          {tab === 'device' && !device && <div className="muted">Select a device in the rack to see its details and ports.</div>}
-          {tab === 'device' && device && (
-            <div>
-              <h2><span className="code">{device.code}</span> {device.name} <Badge color={device.color}>{device.type_name}</Badge></h2>
-              <dl className="kv">
-                <dt>Position</dt><dd>U{device.position_u}{device.height_u > 1 && `–U${device.position_u + device.height_u - 1}`} ({device.height_u}U)</dd>
-                {(device.manufacturer || device.model) && <><dt>Make / model</dt><dd>{device.manufacturer} {device.model}</dd></>}
-                {device.serial && <><dt>Serial</dt><dd className="code">{device.serial}</dd></>}
-                {device.ip_address && <><dt>IP</dt><dd className="code">{device.ip_address}</dd></>}
-                {device.notes && <><dt>Notes</dt><dd style={{ whiteSpace: 'pre-wrap' }}>{device.notes}</dd></>}
-              </dl>
-              {canEdit && <div className="btn-row"><button className="btn btn-sm" onClick={() => setModal({ kind: 'editDevice', device })}>Edit</button><button className="btn btn-sm" onClick={() => setModal({ kind: 'move', device })}>Move to another rack</button><button className="btn btn-sm btn-danger-ghost" onClick={() => setModal({ kind: 'deleteDevice', device })}>Delete</button></div>}
-              {(['front', 'rear'] as Face[]).map((f) => {
-                const ps = device.ports.filter((p) => p.face === f);
-                if (!ps.length) return null;
-                return (
-                  <div key={f}>
-                    <div className="face-head">{f} ports · {ps.filter((p) => p.connection).length}/{ps.length} connected</div>
-                    <div className="ports-grid">{ps.map((p) => (
-                      <button key={p.id} className={`port-chip${p.connection ? ' connected' : ''}${p.id === selectedPort ? ' selected' : ''}`} onClick={() => setSelectedPort(p.id === selectedPort ? null : p.id)} title={`${p.kind}${p.connection ? ` → ${p.connection.device_code}:${p.connection.port_name}` : ''}`}>
-                        <span className="dot" style={p.connection?.color ? { background: cssColor(p.connection.color) } : undefined} />{p.name}{p.vlan_vid != null && <span className="vlan">v{p.vlan_vid}</span>}
-                      </button>
-                    ))}</div>
-                  </div>
-                );
-              })}
-              {device.ports.length === 0 && <div className="muted">This device type has no ports.</div>}
-              {port && <PortDetail port={port} device={device} rack={rack} canEdit={canEdit} onChanged={refresh}
-                onConnect={() => setModal({ kind: 'connect', port })} onTrace={() => setModal({ kind: 'trace', port })} />}
-            </div>
-          )}
-        </div>
-      </div>
-
-      <Dialog open={modal?.kind === 'add'} onClose={() => setModal(null)} title="Add device" wide>
-        {modal?.kind === 'add' && <AddDeviceForm rack={rack} position={modal.position} onDone={() => { setModal(null); refresh(); }} />}
-      </Dialog>
-      <Dialog open={modal?.kind === 'editDevice'} onClose={() => setModal(null)} title="Edit device">
-        {modal?.kind === 'editDevice' && <EditDeviceForm device={modal.device} onDone={() => { setModal(null); refresh(); }} />}
-      </Dialog>
-      <Dialog open={modal?.kind === 'move'} onClose={() => setModal(null)} title="Move device to another rack">
-        {modal?.kind === 'move' && <MoveDeviceForm device={modal.device} onDone={() => { setModal(null); setSelected(null); refresh(); }} />}
-      </Dialog>
-      <Confirm open={modal?.kind === 'deleteDevice'} onClose={() => setModal(null)} title="Delete device"
-        text={modal?.kind === 'deleteDevice' ? `Delete ${modal.device.code}? ${modal.device.ports.filter((p) => p.connection).length} connection(s) will be removed.` : ''}
-        onConfirm={async () => { if (modal?.kind === 'deleteDevice') { await api.del(`/devices/${modal.device.id}`); setSelected(null); await refresh(); } }} />
-      <Dialog open={modal?.kind === 'editRack'} onClose={() => setModal(null)} title="Edit rack">
-        {modal?.kind === 'editRack' && <RackForm roomId={rack.room_id} rack={{ ...rack, device_count: rack.devices.length, used_u: 0 }} onDone={() => { setModal(null); refresh(); }} />}
-      </Dialog>
-      <Dialog open={modal?.kind === 'connect'} onClose={() => setModal(null)} title="Connect port" wide>
-        {modal?.kind === 'connect' && <ConnectForm port={modal.port} device={device!} rack={rack} onDone={() => { setModal(null); refresh(); }} />}
-      </Dialog>
-      <Dialog open={modal?.kind === 'trace'} onClose={() => setModal(null)} title="Trace connection path">
-        {modal?.kind === 'trace' && <TraceView portId={modal.port.id} />}
-      </Dialog>
+      <aside className="sidebar-panel">
+        <div className="sidebar-title"><span className="code">{selectedDevice ? selectedDevice.path : rack.path}{selectedPort ? `/${selectedPort.name}` : ''}</span>
+          <Menu button={<IconBtn title="More"><MoreVertical size={14} /></IconBtn>} items={selectedDevice ? [{ label: 'Copy ID', onClick: () => { navigator.clipboard?.writeText(selectedDevice.path); toast('Copied'); } }, { sep: true, label: '' }, { label: 'Delete device', danger: true, disabled: !canEdit, onClick: () => setModal({ kind: 'delDev', dev: selectedDevice }) }]
+            : [{ label: 'Export as PDF', onClick: () => window.open(`/report/rack/${id}`, '_blank') }, { label: 'Export as PNG', onClick: () => exportPng(rack.code) }, { label: 'Export BOM', onClick: () => window.open(`/report/bom/${id}`, '_blank') }, { label: 'Copy ID', onClick: () => { navigator.clipboard?.writeText(rack.path); toast('Copied'); } }, { label: 'Open on floor plan', onClick: () => nav(`/floors/${rack.floor_id}?device=${rack.id}`) }, { sep: true, label: '' }, { label: 'Delete rack', danger: true, disabled: !canEdit, onClick: () => setModal({ kind: 'delRack' }) }]} /></div>
+        <div className="palette-rail" style={{ display: 'none' }} />
+        {selectedDevice ? <RackDeviceSidebar key={selectedDevice.id} id={selectedDevice.id} canEdit={canEdit} onChanged={refresh} selPort={selPort} setSelPort={setSelPort} /> : <RackDeviceSidebar key={rack.id} id={rack.id} canEdit={canEdit} onChanged={refresh} selPort={null} setSelPort={() => {}} isRack />}
+      </aside>
     </div>
-  );
+    <Dialog open={modal?.kind === 'add'} onClose={() => setModal(null)} title="Add device" subtitle="Add a device to the rack.">{modal?.kind === 'add' && <AddRackDeviceForm rack={rack} templates={tpls.data ?? []} position={modal.position} templateId={modal.templateId} onDone={async (did) => { setModal(null); await refresh(); if (did) { setSelDev(did); setSelPort(null); } }} />}</Dialog>
+    <Confirm open={modal?.kind === 'delDev'} onClose={() => setModal(null)} title="Delete device" text={modal?.kind === 'delDev' ? `Delete ${modal.dev.code} and its connections?` : ''} onConfirm={async () => { if (modal?.kind === 'delDev') { await api.del(`/devices/${modal.dev.id}`); setSelDev(null); await refresh(); } }} />
+    <Confirm open={modal?.kind === 'disc'} onClose={() => setModal(null)} title="Disconnect" label="Disconnect" text={modal?.kind === 'disc' ? `Remove the user connection on ${modal.port.path}?` : ''} onConfirm={async () => { if (modal?.kind === 'disc' && modal.port.user_peer) { await api.del(`/connections/${modal.port.user_peer.connection_id}`); await refresh(); } }} />
+    <Confirm open={modal?.kind === 'delRack'} onClose={() => setModal(null)} title="Delete rack" text={`Delete ${rack.path} with ${rack.devices.length} devices and their connections?`} onConfirm={async () => { await api.del(`/devices/${rack.id}`); await refresh(); nav(`/floors/${rack.floor_id}`); }} />
+    <Dialog open={modal?.kind === 'shortcuts'} onClose={() => setModal(null)} title="Keyboard shortcuts"><ShortcutsHelp /></Dialog>
+    {void types}
+  </div>;
 }
 
-function firstFree(rack: RackDetail, height: number) {
-  const occ = new Set<number>();
-  for (const d of rack.devices) for (let u = d.position_u; u < d.position_u + d.height_u; u++) occ.add(u);
-  for (let u = rack.height_u - height + 1; u >= 1; u--) {
-    let ok = true; for (let k = 0; k < height; k++) if (occ.has(u + k)) { ok = false; break; }
-    if (ok) return u;
-  }
-  return 1;
+function RackDeviceSidebar({ id, canEdit, onChanged, selPort, setSelPort, isRack }: { id: number; canEdit: boolean; onChanged: () => Promise<unknown>; selPort: number | null; setSelPort: (v: number | null) => void; isRack?: boolean }) {
+  const q = useQuery({ queryKey: ['device', id], queryFn: () => api.get<DeviceDetail>(`/devices/${id}`) });
+  if (!q.data) return <Loading />;
+  return <DeviceSettings device={q.data} canEdit={canEdit} onChanged={async () => { await q.refetch(); await onChanged(); }} selectedPortId={selPort} onSelectPort={setSelPort} isRackEditor={isRack} />;
 }
 
-// ---------- SVG rack ----------
-function RackSvg({ rack, face, selected, canEdit, onSelect, onDrop, onEmptyClick }: { rack: RackDetail; face: Face; selected: number | null; canEdit: boolean; onSelect: (id: number) => void; onDrop: (d: Device, u: number) => void; onEmptyClick: (u: number) => void }) {
-  const H = rack.height_u * UH + PAD * 2;
+function TemplatePalette({ templates, canEdit }: { templates: Template[]; canEdit: boolean }) {
+  const [q, setQ] = useState('');
+  const groups = useMemo(() => { const m = new Map<string, Template[]>(); for (const t of templates) { if (q && !`${t.name} ${t.brand} ${t.type_name}`.toLowerCase().includes(q.toLowerCase())) continue; m.set(t.type_name, [...(m.get(t.type_name) ?? []), t]); } return [...m.entries()].sort((a, b) => a[0].localeCompare(b[0])); }, [templates, q]);
+  return <div className="palette-panel"><div className="palette-head"><h3>Devices</h3><div className="muted tiny">Drag device to a rack unit to add it.</div><div style={{ position: 'relative', marginTop: 6 }}><Search size={12} className="muted" style={{ position: 'absolute', left: 7, top: 8 }} /><input placeholder="Search" value={q} onChange={(e) => setQ(e.target.value)} style={{ paddingLeft: 22, fontSize: 12 }} /></div></div>
+    <div className="palette-list-items">{groups.map(([type, list]) => <div key={type}><div className="palette-group-label">{type}</div>{list.map((t) => <div key={t.id} className="palette-item-dev" draggable={canEdit} onDragStart={(e) => { e.dataTransfer.setData('text/rd-template', String(t.id)); e.dataTransfer.effectAllowed = 'copy'; }} title={`${t.height_u}U · ${t.ports.length} ports`}><span style={{ flex: 1 }}>{t.name}</span><span className="muted tiny">{t.height_u}U</span></div>)}</div>)}</div></div>;
+}
+
+function RackCanvas({ rack, face, view, setView, fitMode, selDev, selPort, canEdit, hoverChain, setHoverChain, vlanPorts, conns, onSelectDevice, onSelectPort, onEmptyClick, onDropTemplate, onMoveDevice, onConnect, onClearVlan }: {
+  rack: RackDetail; face: Face; view: View; setView: (v: View) => void; fitMode: 'height' | 'width'; selDev: number | null; selPort: number | null; canEdit: boolean; hoverChain: Set<number> | null; setHoverChain: (s: Set<number> | null) => void; vlanPorts: Set<number> | null; conns: Connection[];
+  onSelectDevice: (id: number | null) => void; onSelectPort: (dev: number, port: number) => void; onEmptyClick: (u: number) => void; onDropTemplate: (tplId: number, u: number) => void; onMoveDevice: (devId: number, u: number) => void; onConnect: (a: number, b: number) => void; onClearVlan: () => void }) {
   const svgRef = useRef<SVGSVGElement>(null);
-  const [drag, setDrag] = useState<{ id: number; startY: number; dy: number } | null>(null);
-  const yOf = (topU: number) => PAD + (rack.height_u - topU) * UH;
-  const occupied = useMemo(() => { const s = new Set<number>(); for (const d of rack.devices) for (let u = d.position_u; u < d.position_u + d.height_u; u++) s.add(u); return s; }, [rack]);
-  const scale = () => { const el = svgRef.current; return el ? el.getBoundingClientRect().width / W : 1; };
-
-  const devices = face === 'front' ? rack.devices : rack.devices; // same devices either face; ports differ in panel
-  return (
-    <svg ref={svgRef} className="rack-canvas" viewBox={`0 0 ${W} ${H}`} role="img" aria-label={`Rack ${rack.code} ${face} view`}>
-      <rect x={GUTTER} y={0} width={W - GUTTER} height={H} rx={6} fill="var(--rack-bg)" />
-      <rect x={GUTTER + 2} y={PAD} width={RAIL} height={rack.height_u * UH} fill="var(--rack-rail)" />
-      <rect x={W - RAIL - 2} y={PAD} width={RAIL} height={rack.height_u * UH} fill="var(--rack-rail)" />
-      {Array.from({ length: rack.height_u }, (_, i) => rack.height_u - i).map((u) => {
-        const y = yOf(u);
-        return (
-          <g key={u}>
-            <text x={GUTTER - 6} y={y + UH / 2 + 4} fontSize={10} textAnchor="end" fill="var(--muted)" fontFamily="var(--mono)">{u}</text>
-            <line x1={GUTTER + RAIL + 2} x2={W - RAIL - 2} y1={y} y2={y} stroke="var(--rack-rail)" strokeWidth={0.5} />
-            {!occupied.has(u) && (
-              <rect x={GUTTER + RAIL + 2} y={y} width={W - GUTTER - RAIL * 2 - 4} height={UH} fill="transparent" style={{ cursor: canEdit ? 'pointer' : 'default' }}
-                onClick={() => onEmptyClick(u)}><title>{canEdit ? `Add device at U${u}` : `U${u} empty`}</title></rect>
-            )}
-          </g>
-        );
-      })}
-      {devices.map((d) => {
-        const topU = d.position_u + d.height_u - 1;
-        const isDrag = drag?.id === d.id;
-        const y = yOf(topU) + (isDrag ? drag.dy : 0);
-        const h = d.height_u * UH;
-        const sel = selected === d.id;
-        const connected = d.ports.filter((p) => p.face === face && p.connection).length;
-        const total = d.ports.filter((p) => p.face === face).length;
-        return (
-          <g key={d.id} transform={`translate(0, ${y})`} style={{ cursor: canEdit ? 'grab' : 'pointer' }}
-            onPointerDown={(e) => {
-              if (!canEdit || e.button !== 0) return;
-              (e.target as Element).setPointerCapture?.(e.pointerId);
-              setDrag({ id: d.id, startY: e.clientY, dy: 0 });
-            }}
-            onPointerMove={(e) => { if (isDrag) setDrag({ ...drag, dy: (e.clientY - drag.startY) / scale() }); }}
-            onPointerUp={() => {
-              if (!isDrag) { onSelect(d.id); return; }
-              const moved = Math.round(drag.dy / UH);
-              setDrag(null);
-              onSelect(d.id);
-              if (moved !== 0) {
-                const newU = Math.max(1, Math.min(rack.height_u - d.height_u + 1, d.position_u - moved));
-                onDrop(d, newU);
-              }
-            }}
-            onPointerCancel={() => setDrag(null)}>
-            <rect x={GUTTER + RAIL + 3} y={1} width={W - GUTTER - RAIL * 2 - 6} height={h - 2} rx={3} fill={d.color} opacity={isDrag ? 0.7 : 1}
-              stroke={sel ? 'var(--primary)' : 'rgba(255,255,255,.25)'} strokeWidth={sel ? 2.5 : 1} />
-            <text x={GUTTER + RAIL + 12} y={Math.min(h / 2 + 4, 14)} fontSize={11} fontWeight={700} fill="#fff" fontFamily="var(--mono)">{d.code}</text>
-            <text x={W - RAIL - 12} y={Math.min(h / 2 + 4, 14)} fontSize={9.5} textAnchor="end" fill="rgba(255,255,255,.85)">{total > 0 ? `${connected}/${total}` : ''} {d.type_name.length > 26 ? d.type_name.slice(0, 24) + '…' : d.type_name}</text>
-            {d.height_u > 1 && d.name && <text x={GUTTER + RAIL + 12} y={28} fontSize={9.5} fill="rgba(255,255,255,.8)">{d.name}</text>}
-            <title>{d.code} {d.name} — {d.type_name}, U{d.position_u}{d.height_u > 1 ? `–U${topU}` : ''}</title>
-          </g>
-        );
-      })}
-    </svg>
-  );
-}
-
-// ---------- Port detail ----------
-function PortDetail({ port, device, rack, canEdit, onChanged, onConnect, onTrace }: { port: Port; device: Device; rack: RackDetail; canEdit: boolean; onChanged: () => Promise<unknown>; onConnect: () => void; onTrace: () => void }) {
-  const toast = useToast();
-  const [renaming, setRenaming] = useState(false); const [name, setName] = useState(port.name);
-  const [disc, setDisc] = useState(false);
-  useEffect(() => { setName(port.name); setRenaming(false); }, [port.id, port.name]);
-  const setVlan = async (v: string) => { try { await api.patch(`/ports/${port.id}`, { vlan_id: v ? Number(v) : null }); await onChanged(); } catch (e) { toast(errMsg(e), 'error'); } };
-  const c = port.connection;
-  return (
-    <div className="port-detail">
-      <h3 style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-        <span className="code">{device.code}:{port.name}</span><Badge>{port.face}</Badge><Badge>{port.kind}</Badge>
-        {port.passthrough_port_id && <span className="muted small">pass-through to {port.face === 'front' ? 'rear' : 'front'} {port.name}</span>}
-      </h3>
-      <dl className="kv">
-        <dt>Connected to</dt>
-        <dd>{c ? <><Link to={`/racks/${c.rack_id}?device=${c.device_id}`}><span className="muted">{c.site_code}/{c.rack_code}/</span><span className="code">{c.device_code}</span>:{c.port_name}</Link> <span className="muted">({c.port_face})</span>
-          {(c.cable_type || c.color || c.label) && <div className="muted small">{c.color && <span className="swatch" style={{ background: cssColor(c.color) }} />}{[c.cable_type, c.color, c.label, c.length_m != null ? `${c.length_m} m` : ''].filter(Boolean).join(' · ')}</div>}</> : <span className="muted">Not connected</span>}</dd>
-        {['rj45', 'sfp', 'sfp+', 'qsfp'].includes(port.kind) && <><dt>VLAN</dt><dd>
-          {canEdit ? <select value={port.vlan_id ?? ''} onChange={(e) => setVlan(e.target.value)} style={{ maxWidth: 260 }}><option value="">— none —</option>{rack.vlans.map((v) => <option key={v.id} value={v.id}>{v.vid} {v.name}</option>)}</select>
-            : <span>{port.vlan_vid != null ? `${port.vlan_vid} ${port.vlan_name}` : '—'}</span>}
-          {rack.vlans.length === 0 && canEdit && <div className="muted small">Define VLANs on the <Link to={`/sites/${rack.site_id}`}>site page</Link>.</div>}
-        </dd></>}
-      </dl>
-      <div className="btn-row">
-        {canEdit && !c && <button className="btn btn-sm btn-primary" onClick={onConnect}>Connect…</button>}
-        {canEdit && c && <button className="btn btn-sm" onClick={() => setDisc(true)}>Disconnect</button>}
-        {(c || port.passthrough_port_id) && <button className="btn btn-sm" onClick={onTrace}>Trace path</button>}
-        {canEdit && !renaming && <button className="btn btn-sm btn-ghost" onClick={() => setRenaming(true)}>Rename</button>}
-      </div>
-      {renaming && <Form submitLabel="Rename" onCancel={() => setRenaming(false)} onSubmit={async () => { await api.patch(`/ports/${port.id}`, { name }); await onChanged(); setRenaming(false); }}>
-        <Field label="Port name" hint="Unique per face. Connections follow the rename."><input value={name} onChange={(e) => setName(e.target.value)} autoFocus /></Field>
-      </Form>}
-      <Confirm open={disc} onClose={() => setDisc(false)} title="Disconnect" text={`Remove the cable between ${device.code}:${port.name} and ${c?.device_code}:${c?.port_name}?`}
-        onConfirm={async () => { await api.del(`/connections/${c!.connection_id}`); await onChanged(); }} />
-    </div>
-  );
-}
-
-// ---------- Connect ----------
-function ConnectForm({ port, device, rack, onDone }: { port: Port; device: Device; rack: RackDetail; onDone: () => void }) {
-  const [q, setQ] = useState(''); const [scope, setScope] = useState<'rack' | 'all'>('rack');
-  const [target, setTarget] = useState<PortSearchRow | null>(null);
-  const [cable, setCable] = useState(''); const [color, setColor] = useState(''); const [label, setLabel] = useState(''); const [length, setLength] = useState('');
-  const results = useQuery({ queryKey: ['portsearch', q, scope, rack.id], queryFn: () => api.get<PortSearchRow[]>(`/ports/search?q=${encodeURIComponent(q)}${scope === 'rack' ? `&rack_id=${rack.id}` : ''}`) });
-  const rows = (results.data ?? []).filter((r) => r.id !== port.id);
-  return (
-    <Form submitLabel="Connect" onCancel={onDone} onSubmit={async () => {
-      if (!target) throw new Error('Pick a port to connect to');
-      await api.post('/connections', { port_a_id: port.id, port_b_id: target.id, cable_type: cable, color, label, length_m: length ? Number(length) : null }); onDone();
-    }}>
-      <div className="muted">From <span className="code">{device.code}:{port.name}</span> ({port.face}, {port.kind}) to:</div>
-      <div className="form-row"><input placeholder="Search device or port, e.g. PP01:12 or SW01" value={q} onChange={(e) => setQ(e.target.value)} autoFocus />
-        <div className="seg"><button type="button" className={scope === 'rack' ? 'active' : ''} onClick={() => setScope('rack')}>This rack</button><button type="button" className={scope === 'all' ? 'active' : ''} onClick={() => setScope('all')}>All sites</button></div></div>
-      <div className="port-results">
-        {rows.length === 0 && <div className="muted" style={{ padding: 10 }}>{results.isLoading ? 'Searching…' : 'No ports match.'}</div>}
-        {rows.map((r) => (
-          <div key={r.id} className={`port-result${target?.id === r.id ? ' selected' : ''}${r.connected ? ' taken' : ''}`} onClick={() => !r.connected && setTarget(r)}>
-            <span><span className="muted">{r.site_code}/{r.rack_code}/</span><span className="code">{r.device_code}:{r.name}</span> <span className="muted small">{r.face} · {r.kind}</span></span>
-            <span className="muted small">{r.connected ? 'in use' : r.type_name}</span>
-          </div>
-        ))}
-      </div>
-      {target && <div>Connecting to <span className="code">{target.device_code}:{target.name}</span> in {target.site_code}/{target.rack_code}</div>}
-      <div className="form-row">
-        <Field label="Cable type"><input list="cable-types" value={cable} onChange={(e) => setCable(e.target.value)} placeholder="Cat6, OM4, DAC…" /><datalist id="cable-types"><option value="Cat5e" /><option value="Cat6" /><option value="Cat6a" /><option value="OM3" /><option value="OM4" /><option value="OS2" /><option value="DAC" /><option value="Power" /></datalist></Field>
-        <Field label="Colour"><input list="cable-colors" value={color} onChange={(e) => setColor(e.target.value)} placeholder="blue" /><datalist id="cable-colors"><option value="blue" /><option value="red" /><option value="green" /><option value="yellow" /><option value="orange" /><option value="grey" /><option value="black" /><option value="white" /><option value="purple" /></datalist></Field>
-      </div>
-      <div className="form-row">
-        <Field label="Cable label"><input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="e.g. C-0123" /></Field>
-        <Field label="Length (m)"><input type="number" step="0.1" min="0" value={length} onChange={(e) => setLength(e.target.value)} /></Field>
-      </div>
-    </Form>
-  );
-}
-
-// ---------- Trace ----------
-function TraceView({ portId }: { portId: number }) {
-  const q = useQuery({ queryKey: ['trace', portId], queryFn: () => api.get<Trace>(`/ports/${portId}/trace`) });
-  if (q.isLoading) return <Loading />; if (q.error) return <ErrorBox error={q.error} />;
-  const t = q.data!;
-  return (
-    <div>
-      <div className="muted">{t.cable_count} cable{t.cable_count === 1 ? '' : 's'} · <span className="code">{t.endpoints.a.device_code}:{t.endpoints.a.name}</span> ⇄ <span className="code">{t.endpoints.b.device_code}:{t.endpoints.b.name}</span></div>
-      <div className="trace">
-        {t.steps.map((s, i) => s.kind === 'port' ? (
-          <div key={i} className={`trace-port${s.port.id === portId ? ' start' : ''}`}>
-            <div><Link to={`/racks/${s.port.rack_id}?device=${s.port.device_id}`}><span className="muted">{s.port.site_code}/{s.port.rack_code}/</span><span className="code">{s.port.device_code}:{s.port.name}</span></Link> <span className="muted small">{s.port.face} · {s.port.kind}{s.port.vlan_vid != null && ` · VLAN ${s.port.vlan_vid}`}</span></div>
-            <div className="muted small">{s.port.type_name}{s.port.device_name && ` · ${s.port.device_name}`}</div>
-          </div>
-        ) : s.kind === 'cable' ? (
-          <div key={i} className="trace-link">{s.connection.color && <span className="swatch" style={{ background: cssColor(s.connection.color) }} />}cable {[s.connection.cable_type, s.connection.label, s.connection.length_m != null ? `${s.connection.length_m} m` : ''].filter(Boolean).join(' · ') || '(no details)'}</div>
-        ) : (
-          <div key={i} className="trace-link">pass-through inside {s.device_code}</div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-// ---------- Rack connections ----------
-function RackConnections({ rackId }: { rackId: number }) {
-  const q = useQuery({ queryKey: ['connections', 'rack', rackId], queryFn: () => api.get<ConnectionRow[]>(`/connections?rack_id=${rackId}`) });
-  if (q.isLoading) return <Loading />; if (q.error) return <ErrorBox error={q.error} />;
-  if (!q.data?.length) return <div className="muted">No connections in this rack yet.</div>;
-  return <div style={{ overflow: 'auto' }}><ConnectionsTable rows={q.data} hideRack={rackId} /></div>;
-}
-
-// ---------- Add / edit / move device ----------
-const PREFIX: Record<string, string> = { switch: 'SW', router: 'RTR', firewall: 'FW', patch_panel: 'PP', server: 'SRV', storage: 'STO', pdu: 'PDU', ups: 'UPS', other: 'DEV' };
-
-function AddDeviceForm({ rack, position, onDone }: { rack: RackDetail; position: number; onDone: () => void }) {
-  const types = useQuery({ queryKey: ['device-types'], queryFn: () => api.get<DeviceType[]>('/device-types') });
-  const [filter, setFilter] = useState(''); const [type, setType] = useState<DeviceType | null>(null);
-  const [code, setCode] = useState(''); const [name, setName] = useState(''); const [pos, setPos] = useState(position);
-  const [serial, setSerial] = useState(''); const [ip, setIp] = useState(''); const [notes, setNotes] = useState('');
-  const pick = (t: DeviceType) => {
-    setType(t);
-    const prefix = PREFIX[t.category] ?? 'DEV';
-    const used = new Set(rack.devices.map((d) => d.code));
-    let n = 1; while (used.has(`${prefix}${String(n).padStart(2, '0')}`)) n++;
-    if (!code || /^[A-Z]+\d{2}$/.test(code)) setCode(`${prefix}${String(n).padStart(2, '0')}`);
-    if (t.height_u > 1) setPos(firstFreeAtOrBelow(rack, pos, t.height_u));
+  const H = rack.height_u * UH + PAD + PAD_TOP; const W = LEFT + RW + GUT + 20;
+  const [drag, setDrag] = useState<null | { kind: 'pan'; sx: number; sy: number; v: View } | { kind: 'device'; id: number; startY: number; dy: number } | { kind: 'wire'; from: number; x: number; y: number }>(null);
+  const yOfTop = (topU: number) => PAD_TOP + (rack.height_u - topU) * UH;
+  const scale = () => { const r = svgRef.current!.getBoundingClientRect(); return fitMode === 'height' ? Math.min(r.width / W, r.height / H) : r.width / W; };
+  const toSvg = (e: { clientX: number; clientY: number }) => { const r = svgRef.current!.getBoundingClientRect(); const s = scale(); const ox = fitMode === 'height' ? (r.width - W * s) / 2 : 0; return { x: ((e.clientX - r.left - ox) / s - view.tx) / view.k, y: ((e.clientY - r.top) / s - view.ty) / view.k }; };
+  const occupied = useMemo(() => { const m = new Map<number, RackDevice>(); for (const d of rack.devices) for (let u = d.position_u ?? 0; u < (d.position_u ?? 0) + d.height_u; u++) m.set(u, d); return m; }, [rack]);
+  // port geometry (device id -> port id -> {x,y,s})
+  const geom = useMemo(() => {
+    const g = new Map<number, { x: number; y: number; s: number; dev: RackDevice; port: Port }>();
+    for (const d of rack.devices) {
+      const ports = d.ports.filter((p) => p.face === face && p.kind !== 'wireless'); if (!ports.length) continue;
+      const h = d.height_u * UH; const { rows, cols, cell } = panelLayout(ports, d.height_u, RW); const top = yOfTop((d.position_u ?? 1) + d.height_u - 1);
+      ports.forEach((p, i) => { const r = Math.floor(i / cols), c = i % cols; const s = Math.min(cell - 3, (h - 8) / rows - 6); const x = LEFT + RAIL + 36 + c * cell; const y = top + 4 + r * (h - 8) / rows + 2; g.set(p.id, { x, y, s, dev: d, port: p }); });
+    }
+    return g;
+  }, [rack, face]); // eslint-disable-line react-hooks/exhaustive-deps
+  const rightX = LEFT + RW + 6;
+  const wires = conns.filter((c) => c.type === 'user' && geom.has(c.port_a_id) && geom.has(c.port_b_id)).map((c, i) => ({ c, a: geom.get(c.port_a_id)!, b: geom.get(c.port_b_id)!, lane: 8 + (i % 10) * 7 }));
+  const outbound = conns.filter((c) => c.type === 'user' && (geom.has(c.port_a_id) !== geom.has(c.port_b_id))).map((c) => ({ c, g: geom.get(geom.has(c.port_a_id) ? c.port_a_id : c.port_b_id)! }));
+  const chainOf = (p: Port) => new Set(p.chain?.steps.map((s) => s.port_id) ?? [p.id]);
+  const portFill = (p: Port, dev: RackDevice) => { if (dev.passive) return p.keystone ? (p.state === 'complete' ? 'var(--port-complete)' : p.state === 'incomplete' ? 'var(--port-incomplete)' : 'var(--port-keystone)') : 'none'; return p.state === 'complete' ? 'var(--port-complete)' : p.state === 'incomplete' ? 'var(--port-incomplete)' : 'none'; };
+  const onDown = (e: RPointerEvent<SVGSVGElement>) => { if (e.button !== 0) return; setDrag({ kind: 'pan', sx: e.clientX, sy: e.clientY, v: view }); };
+  const onMove = (e: RPointerEvent<SVGSVGElement>) => { if (!drag) return; if (drag.kind === 'pan') { const s = scale(); setView({ ...drag.v, tx: drag.v.tx + (e.clientX - drag.sx) / s, ty: drag.v.ty + (e.clientY - drag.sy) / s }); } else if (drag.kind === 'device') setDrag({ ...drag, dy: (e.clientY - drag.startY) / (scale() * view.k) }); else if (drag.kind === 'wire') { const p = toSvg(e); setDrag({ ...drag, x: p.x, y: p.y }); } };
+  const onUp = (e: RPointerEvent<SVGSVGElement>) => {
+    if (!drag) return;
+    if (drag.kind === 'pan') { if (Math.hypot(e.clientX - drag.sx, e.clientY - drag.sy) < 3) { onSelectDevice(null); onClearVlan(); } }
+    else if (drag.kind === 'device') { const d = rack.devices.find((x) => x.id === drag.id)!; const moved = Math.round(drag.dy / UH); onSelectDevice(d.id); if (moved !== 0) onMoveDevice(d.id, Math.max(1, Math.min(rack.height_u - d.height_u + 1, (d.position_u ?? 1) - moved))); }
+    else if (drag.kind === 'wire') { const el = document.elementFromPoint(e.clientX, e.clientY) as Element | null; const pid = Number(el?.closest('[data-port]')?.getAttribute('data-port') ?? 0); if (pid && pid !== drag.from) onConnect(drag.from, pid); }
+    setDrag(null);
   };
-  const f = filter.toLowerCase();
-  const list = (types.data ?? []).filter((t) => !f || `${t.name} ${t.manufacturer} ${t.model} ${t.category}`.toLowerCase().includes(f));
-  return (
-    <Form submitLabel="Add device" onCancel={onDone} onSubmit={async () => {
-      if (!type) throw new Error('Choose a device type');
-      await api.post(`/racks/${rack.id}/devices`, { device_type_id: type.id, code, name, position_u: Number(pos), serial, ip_address: ip, notes }); onDone();
-    }}>
-      <Field label="Device type" hint={<span>Manage templates in the <Link to="/device-types">device library</Link>.</span>}>
-        <input placeholder="Filter types…" value={filter} onChange={(e) => setFilter(e.target.value)} autoFocus />
-      </Field>
-      <div className="type-list">{list.map((t) => (
-        <div key={t.id} className={`type-row${type?.id === t.id ? ' selected' : ''}`} onClick={() => pick(t)}>
-          <span className="type-color" style={{ background: t.color }} /><span style={{ flex: 1 }}>{t.name}{(t.manufacturer || t.model) && <span className="muted"> · {t.manufacturer} {t.model}</span>}</span>
-          <span className="muted small">{t.height_u}U · {t.port_count} ports{t.passthrough ? ' · pass-through' : ''}</span>
-        </div>
-      ))}</div>
-      <div className="form-row">
-        <Field label="Device ID" hint="Unique within the rack"><input value={code} onChange={(e) => setCode(e.target.value)} required /></Field>
-        <Field label="Bottom position (U)" hint={type ? `Occupies U${pos}–U${pos + type.height_u - 1}` : ''}><input type="number" min={1} max={rack.height_u} value={pos} onChange={(e) => setPos(Number(e.target.value))} required /></Field>
-      </div>
-      <Field label="Name / description"><input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Core switch A" /></Field>
-      <div className="form-row">
-        <Field label="Serial number"><input value={serial} onChange={(e) => setSerial(e.target.value)} /></Field>
-        <Field label="IP address"><input value={ip} onChange={(e) => setIp(e.target.value)} /></Field>
-      </div>
-      <Field label="Notes"><textarea rows={2} value={notes} onChange={(e) => setNotes(e.target.value)} /></Field>
-    </Form>
-  );
+  const dragY = (d: RackDevice) => drag?.kind === 'device' && drag.id === d.id ? drag.dy : 0;
+  const unitCenters = Array.from({ length: rack.height_u }, (_, i) => rack.height_u - i);
+  return <svg ref={svgRef} className="editor-canvas" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio={fitMode === 'height' ? 'xMidYMin meet' : 'xMinYMin meet'} style={{ cursor: drag?.kind === 'pan' ? 'grabbing' : 'default' }}
+    onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp} onPointerCancel={() => setDrag(null)}
+    onWheel={(e) => { const p = toSvg(e); setView(zoomAt(view, e.deltaY < 0 ? 1.15 : 1 / 1.15, p.x * view.k + view.tx, p.y * view.k + view.ty)); }}
+    onDragOver={(e) => { if (canEdit && e.dataTransfer.types.includes('text/rd-template')) e.preventDefault(); }} onDrop={(e) => { const t = Number(e.dataTransfer.getData('text/rd-template')); if (!t) return; e.preventDefault(); const p = toSvg(e); const u = Math.max(1, Math.min(rack.height_u, Math.ceil((H - PAD - p.y) / UH))); onDropTemplate(t, u); }}>
+    <g transform={`translate(${view.tx} ${view.ty}) scale(${view.k})`} id="rack-export-root">
+      <rect x={LEFT - 4} y={PAD_TOP - 10} width={RW + 8} height={rack.height_u * UH + 20} rx={4} fill="var(--surface-2)" stroke="var(--border-strong)" />
+      <rect x={LEFT} y={PAD_TOP} width={RAIL} height={rack.height_u * UH} fill="var(--rack-rail)" /><rect x={LEFT + RW - RAIL} y={PAD_TOP} width={RAIL} height={rack.height_u * UH} fill="var(--rack-rail)" />
+      {unitCenters.map((u) => { const y = yOfTop(u); const occ = occupied.get(u); return <g key={u}>
+        <text x={LEFT - 10} y={y + UH / 2 + 3.5} fontSize={9} textAnchor="end" fill="var(--muted)" fontFamily="var(--mono)">{u}</text>
+        <circle cx={LEFT + RAIL / 2} cy={y + UH / 2} r={2} fill="var(--border-strong)" /><circle cx={LEFT + RW - RAIL / 2} cy={y + UH / 2} r={2} fill="var(--border-strong)" />
+        {!occ && <g style={{ cursor: canEdit ? 'pointer' : 'default' }} onPointerDown={(e) => e.stopPropagation()} onClick={() => onEmptyClick(u)}><rect x={LEFT + RAIL} y={y} width={RW - RAIL * 2} height={UH} fill="transparent" /><line x1={LEFT + RAIL} x2={LEFT + RW - RAIL} y1={y + UH} y2={y + UH} stroke="var(--border)" strokeWidth={0.5} />{canEdit && <g opacity={0.5}><circle cx={LEFT + RW / 2} cy={y + UH / 2} r={6} fill="none" stroke="var(--primary)" strokeWidth={1} /><text x={LEFT + RW / 2} y={y + UH / 2 + 3.5} fontSize={10} textAnchor="middle" fill="var(--primary)">+</text></g>}<title>{canEdit ? `Add device at U${u}` : `U${u} empty`}</title></g>}
+      </g>; })}
+      {rack.devices.map((d) => { const top = yOfTop((d.position_u ?? 1) + d.height_u - 1) + dragY(d); const h = d.height_u * UH; const active = selDev === d.id; const tpl = d.template_name ?? d.type_name;
+        return <g key={d.id} transform={`translate(0 ${top})`} style={{ cursor: canEdit ? 'grab' : 'pointer' }} onPointerDown={(e) => { e.stopPropagation(); if (!canEdit) { onSelectDevice(d.id); return; } setDrag({ kind: 'device', id: d.id, startY: e.clientY, dy: 0 }); (e.currentTarget as Element).setPointerCapture?.(e.pointerId); }} onPointerUp={(e) => { if (drag?.kind === 'device') { e.stopPropagation(); onUp(e as unknown as RPointerEvent<SVGSVGElement>); } else if (!canEdit) onSelectDevice(d.id); }}>
+          <rect x={LEFT + RAIL + 1} y={1} width={RW - RAIL * 2 - 2} height={h - 2} rx={2} fill="var(--surface)" stroke={active ? 'var(--primary)' : 'var(--border-strong)'} strokeWidth={active ? 2 : 1} opacity={drag?.kind === 'device' && drag.id === d.id ? 0.75 : 1} />
+          <rect x={LEFT + RAIL + 1} y={1} width={30} height={h - 2} fill="var(--surface-2)" />
+          <text transform={`translate(${LEFT + RAIL + 16} ${h / 2}) rotate(-90)`} fontSize={h > 30 ? 9 : 7.5} fontWeight={700} textAnchor="middle" fill="var(--text)" fontFamily="var(--mono)">{d.code}</text>
+          <title>{d.path} · {tpl}{d.name ? ` · ${d.name}` : ''}</title>
+          {d.ports.filter((p) => p.face === face && p.kind !== 'wireless').length === 0 && <text x={LEFT + RW / 2 + 10} y={h / 2 + 3.5} fontSize={9} textAnchor="middle" fill="var(--muted)">{tpl}{d.name ? ` · ${d.name}` : ''}</text>}
+        </g>; })}
+      {[...geom.values()].map(({ x, y, s, dev, port }) => { const top = dragY(dev); const chainHi = hoverChain?.has(port.id); const vlanHi = vlanPorts?.has(port.id); const sel = selPort === port.id; const fill = portFill(port, dev);
+        const stroke = chainHi ? '#eab308' : sel ? 'var(--primary)' : vlanHi ? 'var(--amber)' : dev.passive && !port.keystone ? 'var(--port-none)' : fill === 'none' ? 'var(--port-none)' : fill;
+        return <g key={port.id} transform={`translate(${x} ${y + top})`} data-port={port.id} style={{ cursor: canEdit ? 'crosshair' : 'pointer' }}
+          onPointerEnter={() => port.state !== 'none' && setHoverChain(chainOf(port))} onPointerLeave={() => setHoverChain(null)}
+          onPointerDown={(e) => { e.stopPropagation(); if (canEdit && !port.user && (!dev.passive || port.keystone)) { const p = toSvg(e); setDrag({ kind: 'wire', from: port.id, x: p.x, y: p.y }); (e.target as Element).setPointerCapture?.(e.pointerId); } }}
+          onPointerUp={(e) => { e.stopPropagation(); if (drag?.kind === 'wire') { onUp(e as unknown as RPointerEvent<SVGSVGElement>); if (Math.abs(drag.x) < 1) onSelectPort(dev.id, port.id); } else onSelectPort(dev.id, port.id); if (drag?.kind === 'wire' && drag.from === port.id) onSelectPort(dev.id, port.id); }}>
+          <rect x={0} y={0} width={s} height={s} rx={1.5} fill={fill === 'none' ? 'var(--surface)' : fill} stroke={stroke} strokeWidth={chainHi || sel || vlanHi ? 2 : 1.2} strokeDasharray={dev.passive && !port.keystone ? '2 1.5' : undefined} />
+          {chainHi && <rect x={-1.5} y={-1.5} width={s + 3} height={s + 3} rx={2} fill="none" stroke="#eab308" strokeWidth={1} opacity={0.6} />}
+          {vlanHi && port.vlan_id && <circle cx={s} cy={0} r={2} fill="var(--amber)" />}
+          <text x={s / 2} y={s + 6} fontSize={4.2} textAnchor="middle" fill="var(--muted)" style={{ pointerEvents: 'none' }}>{port.name.length > 5 ? port.name.slice(0, 4) + '…' : port.name}</text>
+          <title>{port.path} · {port.kind}{port.vlan_vid != null ? ` · VLAN ${port.vlan_vid}` : ''} · {dev.passive && !port.keystone ? 'no building connection (no keystone)' : port.state === 'none' ? 'unconnected' : port.state}</title>
+        </g>; })}
+      {wires.map(({ c, a, b, lane }) => { const hi = hoverChain?.has(c.port_a_id); const col = hi ? '#eab308' : (c.chain?.color || 'var(--user)'); const ax = a.x + a.s / 2, ay = a.y + a.s / 2 + dragY(a.dev), bx = b.x + b.s / 2, by = b.y + b.s / 2 + dragY(b.dev); const lx = rightX + lane;
+        return <path key={c.id} d={`M ${ax} ${ay} L ${ax} ${ay - a.s} L ${lx} ${ay - a.s} L ${lx} ${by - b.s} L ${bx} ${by - b.s} L ${bx} ${by}`} fill="none" stroke={col} strokeWidth={hi ? 2 : 1.2} opacity={hoverChain && !hi ? 0.25 : 0.9} style={{ pointerEvents: 'none' }} />; })}
+      {outbound.map(({ c, g }) => { const hi = hoverChain?.has(g.port.id); return <g key={c.id} transform={`translate(${g.x + g.s / 2} ${g.y - 2 + dragY(g.dev)})`} style={{ pointerEvents: 'none' }}><line x1={0} y1={0} x2={0} y2={-6} stroke={hi ? '#eab308' : (c.chain?.color || 'var(--user)')} strokeWidth={1.2} /><rect x={-14} y={-14} width={28} height={8} rx={2} fill="var(--text)" /><text x={0} y={-8} fontSize={5} textAnchor="middle" fill="var(--bg)" fontWeight={700}>⇗ OUTBOUND</text></g>; })}
+      {drag?.kind === 'wire' && geom.get(drag.from) && <line x1={geom.get(drag.from)!.x + geom.get(drag.from)!.s / 2} y1={geom.get(drag.from)!.y + geom.get(drag.from)!.s / 2} x2={drag.x} y2={drag.y} stroke="var(--primary)" strokeWidth={1.5} strokeDasharray="4 3" style={{ pointerEvents: 'none' }} />}
+    </g>
+  </svg>;
 }
 
-function firstFreeAtOrBelow(rack: RackDetail, from: number, height: number) {
-  const occ = new Set<number>();
-  for (const d of rack.devices) for (let u = d.position_u; u < d.position_u + d.height_u; u++) occ.add(u);
-  const fits = (u: number) => { if (u < 1 || u + height - 1 > rack.height_u) return false; for (let k = 0; k < height; k++) if (occ.has(u + k)) return false; return true; };
-  if (fits(from)) return from;
-  for (let u = from - 1; u >= 1; u--) if (fits(u)) return u;
-  for (let u = from + 1; u <= rack.height_u; u++) if (fits(u)) return u;
-  return from;
+function AddRackDeviceForm({ rack, templates, position, templateId, onDone }: { rack: RackDetail; templates: Template[]; position: number; templateId?: number; onDone: (id?: number) => void }) {
+  const [tplId, setTplId] = useState(templateId ?? 0); const [code, setCode] = useState(''); const [name, setName] = useState(''); const [pos, setPos] = useState(position); const [q, setQ] = useState('');
+  const tpl = templates.find((t) => t.id === tplId);
+  useEffect(() => { if (!tpl) return; const used = new Set(rack.devices.map((d) => d.code)); let n = 1; while (used.has(`${tpl.prefix}${String(n).padStart(2, '0')}`)) n++; setCode(`${tpl.prefix}${String(n).padStart(2, '0')}`); }, [tpl, rack.devices]);
+  const list = templates.filter((t) => !q || `${t.name} ${t.type_name} ${t.brand}`.toLowerCase().includes(q.toLowerCase()));
+  return <Form submitLabel="Add device" onCancel={() => onDone()} onSubmit={async () => { if (!tplId) throw new Error('Select a device'); const d = await api.post<{ id: number }>(`/racks/${rack.id}/devices`, { template_id: tplId, code, name, position_u: Number(pos) }); onDone(d.id); }}>
+    <Field label="Device" required><input placeholder="Filter…" value={q} onChange={(e) => setQ(e.target.value)} autoFocus={!templateId} /></Field>
+    <div className="cfg-list" style={{ maxHeight: 220 }}>{list.map((t) => <div key={t.id} className="cfg-row" style={{ background: tplId === t.id ? 'var(--accent)' : undefined }} onClick={() => setTplId(t.id)}><span className="grow">{t.name}{t.brand && <span className="muted"> · {t.brand}</span>}</span><span className="muted small">{t.type_name} · {t.height_u}U · {t.ports.length} ports</span></div>)}</div>
+    <div className="form-row"><Field label="ID" required><input value={code} onChange={(e) => setCode(e.target.value.toUpperCase())} required className="code" /></Field><Field label="Rack unit (bottom)" hint={tpl ? `Occupies U${pos}–U${pos + tpl.height_u - 1}` : ''}><input type="number" min={1} max={rack.height_u} value={pos} onChange={(e) => setPos(Number(e.target.value))} required /></Field></div>
+    <Field label="Name"><input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Core switch A" /></Field>
+  </Form>;
 }
 
-function EditDeviceForm({ device, onDone }: { device: Device; onDone: () => void }) {
-  const [code, setCode] = useState(device.code); const [name, setName] = useState(device.name); const [pos, setPos] = useState(device.position_u);
-  const [serial, setSerial] = useState(device.serial); const [ip, setIp] = useState(device.ip_address); const [notes, setNotes] = useState(device.notes);
-  return (
-    <Form onCancel={onDone} onSubmit={async () => { await api.patch(`/devices/${device.id}`, { code, name, position_u: Number(pos), serial, ip_address: ip, notes }); onDone(); }}>
-      <div className="muted">{device.type_name} · {device.height_u}U</div>
-      <div className="form-row">
-        <Field label="Device ID"><input value={code} onChange={(e) => setCode(e.target.value)} required autoFocus /></Field>
-        <Field label="Bottom position (U)"><input type="number" min={1} value={pos} onChange={(e) => setPos(Number(e.target.value))} required /></Field>
-      </div>
-      <Field label="Name / description"><input value={name} onChange={(e) => setName(e.target.value)} /></Field>
-      <div className="form-row">
-        <Field label="Serial number"><input value={serial} onChange={(e) => setSerial(e.target.value)} /></Field>
-        <Field label="IP address"><input value={ip} onChange={(e) => setIp(e.target.value)} /></Field>
-      </div>
-      <Field label="Notes"><textarea rows={3} value={notes} onChange={(e) => setNotes(e.target.value)} /></Field>
-    </Form>
-  );
-}
-
-function MoveDeviceForm({ device, onDone }: { device: Device; onDone: () => void }) {
-  const racks = useQuery({ queryKey: ['racks'], queryFn: () => api.get<{ id: number; code: string; site_code: string; room_code: string; height_u: number }[]>('/racks') });
-  const [rackId, setRackId] = useState<number>(device.rack_id); const [pos, setPos] = useState(device.position_u);
-  const connected = device.ports.filter((p) => p.connection).length;
-  return (
-    <Form submitLabel="Move" onCancel={onDone} onSubmit={async () => { await api.patch(`/devices/${device.id}`, { rack_id: rackId, position_u: Number(pos) }); onDone(); }}>
-      {connected > 0 && <div className="muted">{connected} connection(s) will be kept and follow the device.</div>}
-      <Field label="Target rack"><select value={rackId} onChange={(e) => setRackId(Number(e.target.value))}>{racks.data?.map((r) => <option key={r.id} value={r.id}>{r.site_code} / {r.room_code} / {r.code} ({r.height_u}U)</option>)}</select></Field>
-      <Field label="Bottom position (U)"><input type="number" min={1} value={pos} onChange={(e) => setPos(Number(e.target.value))} required /></Field>
-    </Form>
-  );
+function exportPng(name: string) {
+  const svg = document.querySelector('svg.editor-canvas') as SVGSVGElement | null; if (!svg) return;
+  const clone = svg.cloneNode(true) as SVGSVGElement; const vb = svg.viewBox.baseVal; clone.setAttribute('width', String(vb.width * 2)); clone.setAttribute('height', String(vb.height * 2));
+  const css = getComputedStyle(document.documentElement); const vars = ['--surface', '--surface-2', '--border', '--border-strong', '--text', '--muted', '--primary', '--port-none', '--port-complete', '--port-incomplete', '--port-keystone', '--rack-rail', '--user', '--amber', '--bg', '--mono'];
+  let xml = new XMLSerializer().serializeToString(clone); for (const v of vars) xml = xml.split(`var(${v})`).join(css.getPropertyValue(v).trim() || '#000');
+  const blob = new Blob([xml], { type: 'image/svg+xml' }); const url = URL.createObjectURL(blob); const img = new Image();
+  img.onload = () => { const c = document.createElement('canvas'); c.width = vb.width * 2; c.height = vb.height * 2; const ctx = c.getContext('2d')!; ctx.fillStyle = css.getPropertyValue('--surface').trim() || '#fff'; ctx.fillRect(0, 0, c.width, c.height); ctx.drawImage(img, 0, 0); const a = document.createElement('a'); a.download = `${name}.png`; a.href = c.toDataURL('image/png'); a.click(); URL.revokeObjectURL(url); };
+  img.src = url;
 }
