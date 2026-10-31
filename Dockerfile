@@ -1,5 +1,6 @@
+ARG NODE_IMAGE=node:22-bookworm-slim
 # Build stage
-FROM node:22-bookworm-slim AS build
+FROM ${NODE_IMAGE} AS build
 WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ && rm -rf /var/lib/apt/lists/*
 COPY package.json package-lock.json ./
@@ -9,7 +10,7 @@ COPY src ./src
 RUN npm run build && npm prune --omit=dev
 
 # Runtime stage
-FROM node:22-bookworm-slim
+FROM ${NODE_IMAGE}
 WORKDIR /app
 ENV NODE_ENV=production PORT=3000 DATA_DIR=/data
 COPY --from=build /app/node_modules ./node_modules
