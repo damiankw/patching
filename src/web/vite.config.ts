@@ -11,6 +11,7 @@ export default defineConfig({
   },
   server: {
     host: true,
+    allowedHosts: true, // internal tool: accept any hostname (stable.example.net, LAN IPs, Tailscale names)
     port: 5173,
     proxy: { '/api': 'http://localhost:3000' },
   },
