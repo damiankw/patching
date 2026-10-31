@@ -53,6 +53,7 @@ app.use((err: unknown, _req: express.Request, res: express.Response, _next: expr
 });
 
 const port = Number(process.env.PORT ?? 3000);
+const host = process.env.HOST ?? '0.0.0.0';
 purgeExpiredSessions();
 setInterval(purgeExpiredSessions, 6 * 3600_000).unref();
-app.listen(port, () => console.log(`rackdocs listening on http://localhost:${port} (db: ${DB_PATH})`));
+app.listen(port, host, () => console.log(`rackdocs listening on http://${host}:${port} (db: ${DB_PATH})`));

@@ -39,12 +39,13 @@ For development with hot reload:
 npm run dev
 ```
 
-The web app is then on http://localhost:5173 and proxies API calls to the server on port 3000.
+The web app is then on port 5173 (all interfaces) and proxies API calls to the server on port 3000.
 
 ## Configuration
 
 | Variable | Default | Meaning |
 |---|---|---|
+| `HOST` | `0.0.0.0` | Interface to bind. Use `127.0.0.1` to restrict to the local machine |
 | `PORT` | `3000` | HTTP port |
 | `DATA_DIR` | `./data` (or `/data` in Docker) | Folder holding `rackdocs.db` |
 | `COOKIE_SECURE` | unset | Set to `1` when served over HTTPS so the session cookie is marked Secure |
