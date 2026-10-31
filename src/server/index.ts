@@ -1,9 +1,10 @@
+import './nodeCheck.js'; // must stay first: runs before the native SQLite module loads
 import express from 'express';
 import cookieParser from 'cookie-parser';
 import path from 'node:path';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { DB_PATH } from './db.js';
+import { DB_PATH, db } from './db.js';
 import { purgeExpiredSessions, sessionMiddleware } from './auth.js';
 import { HttpError } from './errors.js';
 import { authRouter } from './routes/auth.js';
@@ -56,4 +57,19 @@ const port = Number(process.env.PORT ?? 3000);
 const host = process.env.HOST ?? '0.0.0.0';
 purgeExpiredSessions();
 setInterval(purgeExpiredSessions, 6 * 3600_000).unref();
-app.listen(port, host, () => console.log(`rackdocs listening on http://${host}:${port} (db: ${DB_PATH})`));
+const server = app.listen(port, host, () => console.log(`rackdocs listening on http://${host}:${port} (db: ${DB_PATH})`));
+
+let shuttingDown = false;
+function shutdown(signal: string) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`${signal} received, shutting down`);
+  const timer = setTimeout(() => { console.error('Shutdown timed out, forcing exit'); process.exit(1); }, 3000);
+  timer.unref();
+  server.close(() => {
+    try { db.close(); } catch (e) { console.error('Error closing database', e); }
+    process.exit(0);
+  });
+  server.closeAllConnections();
+}
+for (const sig of ['SIGINT', 'SIGTERM'] as const) process.on(sig, () => shutdown(sig));

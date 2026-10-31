@@ -50,6 +50,24 @@ The web app is then on port 5173 (all interfaces) and proxies API calls to the s
 | `DATA_DIR` | `./data` (or `/data` in Docker) | Folder holding `rackdocs.db` |
 | `COOKIE_SECURE` | unset | Set to `1` when served over HTTPS so the session cookie is marked Secure |
 
+## Troubleshooting
+
+**`Segmentation fault` or `NODE_MODULE_VERSION` error on start.** The SQLite driver is a native module compiled for a specific Node version. This happens when `npm install` ran under a different Node than `npm start` uses, or after upgrading Node. Rebuild it for the Node you are running:
+
+```bash
+npm rebuild better-sqlite3
+```
+
+If that still fails, build it from source (needs python3, make and a C++ compiler):
+
+```bash
+npm rebuild better-sqlite3 --build-from-source
+```
+
+Supported Node versions are 20, 22 and 24. Check with `node -v`.
+
+**Port already in use.** Set `PORT` to something else, or stop the other process.
+
 ## Backups
 
 Copy the database file while the app is running:
