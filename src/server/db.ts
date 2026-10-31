@@ -1,4 +1,4 @@
-import Database from 'better-sqlite3';
+import { Db } from './sqlite.js';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -6,9 +6,43 @@ const DATA_DIR = process.env.DATA_DIR ?? path.resolve(process.cwd(), 'data');
 fs.mkdirSync(DATA_DIR, { recursive: true });
 export const DB_PATH = path.join(DATA_DIR, 'rackdocs.db');
 
-export const db = new Database(DB_PATH);
-db.pragma('journal_mode = WAL');
+const LOCK_DIR = `${DB_PATH}.lock`;
+const PID_FILE = path.join(DATA_DIR, 'rackdocs.pid');
+
+function processAlive(pid: number): boolean {
+  try { process.kill(pid, 0); return true; } catch (e) { return (e as NodeJS.ErrnoException).code === 'EPERM'; }
+}
+
+/**
+ * The WebAssembly SQLite driver holds a lock directory next to the database for the
+ * life of the connection and removes it on a clean close. After a crash, power loss
+ * or SIGKILL the directory is left behind and the database would report "locked"
+ * forever. We record our PID; on start, a PID file pointing at a dead process (or at
+ * ourselves, as happens for PID 1 in a fresh container) means any lock is stale.
+ */
+function claimInstance() {
+  let recordedPid = 0;
+  try { recordedPid = Number(fs.readFileSync(PID_FILE, 'utf8').trim()); } catch { /* no pid file */ }
+  const otherRunning = recordedPid > 0 && recordedPid !== process.pid && processAlive(recordedPid);
+  if (otherRunning) {
+    console.error(`Another rackdocs instance (pid ${recordedPid}) appears to be using ${DB_PATH}.`);
+    console.error(`If that is not the case, delete ${PID_FILE} and ${LOCK_DIR} and start again.`);
+    process.exit(1);
+  }
+  if (fs.existsSync(LOCK_DIR)) {
+    console.warn('Removing stale database lock left by an unclean shutdown');
+    fs.rmSync(LOCK_DIR, { recursive: true, force: true });
+  }
+  fs.writeFileSync(PID_FILE, String(process.pid));
+  process.on('exit', () => {
+    try { if (Number(fs.readFileSync(PID_FILE, 'utf8').trim()) === process.pid) fs.unlinkSync(PID_FILE); } catch { /* ignore */ }
+  });
+}
+
+claimInstance();
+export const db = new Db(DB_PATH);
 db.pragma('foreign_keys = ON');
+db.pragma('busy_timeout = 5000');
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS users (

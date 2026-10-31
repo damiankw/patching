@@ -1,6 +1,6 @@
 # Rackdocs
 
-Self-hosted network and rack documentation for internal use. Document sites, floors, rooms and racks, place devices in racks, record every port-to-port cable, and trace a connection end to end through patch panels. Single Node process with a SQLite database file. No external services.
+Self-hosted network and rack documentation for internal use. Document sites, floors, rooms and racks, place devices in racks, record every port-to-port cable, and trace a connection end to end through patch panels. Single Node process with a SQLite database file. No external services and no native modules: SQLite runs as WebAssembly, so `npm install` needs no compiler.
 
 ## What it does
 
@@ -52,32 +52,19 @@ The web app is then on port 5173 (all interfaces) and proxies API calls to the s
 
 ## Troubleshooting
 
-**`Segmentation fault` or `NODE_MODULE_VERSION` error on start.** The SQLite driver is a native module compiled for a specific Node version. This happens when `npm install` ran under a different Node than `npm start` uses, or after upgrading Node. Rebuild it for the Node you are running:
+**Node version.** Node 20 or newer is required. Check with `node -v`.
 
-```bash
-npm rebuild better-sqlite3
-```
-
-If that still fails, build it from source (needs python3, make and a C++ compiler):
-
-```bash
-npm rebuild better-sqlite3 --build-from-source
-```
-
-Supported Node versions are 20, 22 and 24. Check with `node -v`.
+**`database is locked` or "Another rackdocs instance appears to be using" on start.** The app keeps a `rackdocs.pid` file and the SQLite driver keeps a `rackdocs.db.lock` folder in the data directory while running. Stale ones from a crash are cleaned up automatically. If the app refuses to start and you are sure nothing else is running, delete both and start again.
 
 **Port already in use.** Set `PORT` to something else, or stop the other process.
 
 ## Backups
 
-Copy the database file while the app is running:
+The database is the single file `rackdocs.db` in the data folder. Stop the app (or the container) and copy that file. With Docker:
 
 ```bash
-docker compose exec rackdocs node -e "require('better-sqlite3')('/data/rackdocs.db').backup('/data/backup.db')"
-docker compose cp rackdocs:/data/backup.db ./rackdocs-backup.db
+docker compose stop && docker compose cp rackdocs:/data/rackdocs.db ./rackdocs-backup.db && docker compose start
 ```
-
-Or stop the container and copy `rackdocs.db` from the volume directly.
 
 ## Concepts
 

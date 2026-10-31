@@ -1,4 +1,4 @@
-import './nodeCheck.js'; // must stay first: runs before the native SQLite module loads
+import './nodeCheck.js';
 import express from 'express';
 import cookieParser from 'cookie-parser';
 import path from 'node:path';
@@ -42,12 +42,13 @@ if (fs.existsSync(path.join(webDir, 'index.html'))) {
 
 app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
   if (err instanceof HttpError) return res.status(err.status).json({ error: err.message });
-  const e = err as { code?: string; message?: string; type?: string };
-  if (e.code === 'SQLITE_CONSTRAINT_UNIQUE') {
-    const field = (e.message ?? '').split(':').pop()?.trim() ?? '';
+  const e = err as { code?: string; message?: string; type?: string; name?: string };
+  const msg = e.message ?? '';
+  if (/UNIQUE constraint failed/.test(msg)) {
+    const field = msg.split(':').pop()?.trim() ?? '';
     return res.status(409).json({ error: `Already exists: ${field.replace(/\w+\./g, '')}` });
   }
-  if (e.code?.startsWith('SQLITE_CONSTRAINT')) return res.status(409).json({ error: e.message });
+  if (e.name === 'SQLite3Error' && /constraint failed/i.test(msg)) return res.status(409).json({ error: msg });
   if (e.type === 'entity.parse.failed') return res.status(400).json({ error: 'Invalid JSON' });
   console.error(err);
   res.status(500).json({ error: 'Internal error' });

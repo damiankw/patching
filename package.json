@@ -15,15 +15,14 @@
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",
-    "better-sqlite3": "^12.11.1",
     "cookie-parser": "^1.4.7",
     "express": "^5.3.0",
+    "node-sqlite3-wasm": "^0.8.61",
     "zod": "^4.6.7"
   },
   "devDependencies": {
     "@tanstack/react-query": "^5.105.0",
     "@types/bcryptjs": "^2.4.6",
-    "@types/better-sqlite3": "^9.6.0",
     "@types/cookie-parser": "^1.4.10",
     "@types/express": "^5.0.6",
     "@types/node": "^26.6.6",
