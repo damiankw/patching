@@ -28,9 +28,17 @@ Open http://localhost:3000 and create the first admin account. Data lives in the
 Requires Node 22 or newer.
 
 ```bash
-npm install
+npm ci
 npm run build
 npm start
+```
+
+Use `npm ci` rather than `npm install`: it installs exactly what the lockfile says and never rewrites it, so a later `git pull` is not blocked by a modified `package-lock.json`.
+
+To update to a newer version:
+
+```bash
+git pull && npm ci && npm run build
 ```
 
 For development with hot reload:
@@ -51,6 +59,12 @@ The web app is then on port 5173 (all interfaces) and proxies API calls to the s
 | `COOKIE_SECURE` | unset | Set to `1` when served over HTTPS so the session cookie is marked Secure |
 
 ## Troubleshooting
+
+**`git pull` says package-lock.json would be overwritten.** An earlier `npm install` rewrote the lockfile. Discard that change and pull again:
+
+```bash
+git checkout -- package-lock.json && git pull && npm ci
+```
 
 **Node version.** Node 20 or newer is required. Check with `node -v`.
 
