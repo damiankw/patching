@@ -1,0 +1,13 @@
+services:
+  rackdocs:
+    build: .
+    ports:
+      - "3000:3000"
+    volumes:
+      - rackdocs-data:/data
+    restart: unless-stopped
+    # Set COOKIE_SECURE=1 if you put this behind HTTPS (recommended on a LAN with a reverse proxy).
+    # environment:
+    #   - COOKIE_SECURE=1
+volumes:
+  rackdocs-data:
