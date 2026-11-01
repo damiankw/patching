@@ -6,7 +6,7 @@ import path from 'node:path';
 import { db, UPLOAD_DIR } from '../db.js';
 import { requireRole } from '../auth.js';
 import { badRequest, notFound } from '../errors.js';
-import { codeSchema, idParam, nameSchema, parse, textSchema } from '../util.js';
+import { codeSchema, idParam, nameSchema, parse, patchOf, textSchema } from '../util.js';
 import { logActivity } from '../activity.js';
 import { DEVICE_COLS, DEVICE_JOIN, connectionOfPort, getPort, peerOf, portState, roomForPoint, tracePort, updateRow, type DeviceRow, type Pt } from '../model.js';
 
@@ -46,7 +46,7 @@ locationsRouter.get('/locations/:id', (req, res) => {
 });
 locationsRouter.patch('/locations/:id', edit, (req, res) => {
   const id = idParam(req);
-  const b = parse(locBody.partial(), req.body);
+  const b = parse(patchOf(locBody), req.body);
   const row = db.prepare('SELECT code FROM locations WHERE id = ?').get<{ code: string }>(id);
   if (!row) throw notFound('Location not found');
   updateRow('locations', id, b);
@@ -95,7 +95,7 @@ function floorLabel(id: number) {
 }
 locationsRouter.patch('/floors/:id', edit, (req, res) => {
   const id = idParam(req);
-  const b = parse(floorBody.partial(), req.body);
+  const b = parse(patchOf(floorBody), req.body);
   const label = floorLabel(id);
   updateRow('floors', id, b);
   logActivity(req, 'update', 'floor', id, label, { fields: Object.keys(b) });
@@ -196,7 +196,7 @@ locationsRouter.post('/floors/:id/rooms', edit, (req, res) => {
 });
 locationsRouter.patch('/rooms/:id', edit, (req, res) => {
   const id = idParam(req);
-  const b = parse(roomBody.partial(), req.body);
+  const b = parse(patchOf(roomBody), req.body);
   const room = db.prepare('SELECT r.*, l.code AS lc, f.code AS fc FROM rooms r JOIN floors f ON f.id = r.floor_id JOIN locations l ON l.id = f.location_id WHERE r.id = ?').get<{ floor_id: number; code: string; lc: string; fc: string }>(id);
   if (!room) throw notFound('Room not found');
   updateRow('rooms', id, { ...b, points: b.points ? JSON.stringify(b.points) : undefined });

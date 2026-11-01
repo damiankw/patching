@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { db } from '../db.js';
 import { requireRole } from '../auth.js';
 import { badRequest, notFound } from '../errors.js';
-import { idParam, parse, textSchema } from '../util.js';
+import { idParam, parse, patchOf, textSchema } from '../util.js';
 import { logActivity } from '../activity.js';
 import { connectionOfPort, getDevice, getPort, peerOf, tracePort, updateRow, type ConnRow } from '../model.js';
 
@@ -45,7 +45,7 @@ connectionsRouter.post('/connections', edit, (req, res) => {
 });
 connectionsRouter.patch('/connections/:id', edit, (req, res) => {
   const id = idParam(req);
-  const b = parse(body.omit({ port_a_id: true, port_b_id: true, type: true }).partial(), req.body);
+  const b = parse(patchOf(body.omit({ port_a_id: true, port_b_id: true, type: true })), req.body);
   const c = db.prepare('SELECT * FROM connections WHERE id = ?').get<ConnRow>(id);
   if (!c) throw notFound('Connection not found');
   db.transaction(() => {

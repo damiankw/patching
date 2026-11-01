@@ -7,6 +7,10 @@ services:
       - rackdocs-data:/data
     restart: unless-stopped
     # Set COOKIE_SECURE=1 if you put this behind HTTPS (recommended on a LAN with a reverse proxy).
+    # For the AI Assistant, create a .env file next to this one with ANTHROPIC_API_KEY=sk-ant-...
+    env_file:
+      - path: .env
+        required: false
     # environment:
     #   - COOKIE_SECURE=1
 volumes:

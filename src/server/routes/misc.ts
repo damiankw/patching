@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import { db, UPLOAD_DIR } from '../db.js';
 import { requireRole } from '../auth.js';
 import { notFound } from '../errors.js';
-import { DEVICE_COLS, DEVICE_JOIN, DEVICE_PATH, getPort, tracePort } from '../model.js';
+import { DEVICE_COLS, DEVICE_JOIN, DEVICE_PATH, getPort, resolvePath, tracePort } from '../model.js';
 
 export const miscRouter = Router();
 miscRouter.use(requireRole('viewer'));
@@ -16,6 +16,12 @@ miscRouter.get('/files/:uuid', (req, res) => {
   if (!fs.existsSync(p)) throw notFound('File missing on disk');
   res.setHeader('Content-Type', f.mime); res.setHeader('Cache-Control', 'private, max-age=86400');
   fs.createReadStream(p).pipe(res);
+});
+
+miscRouter.get('/resolve', (req, res) => {
+  const r = resolvePath(String(req.query.path ?? ''));
+  if (!r) throw notFound(`Nothing found at path ${req.query.path}`);
+  res.json(r);
 });
 
 miscRouter.get('/search', (req, res) => {
@@ -30,7 +36,7 @@ miscRouter.get('/search', (req, res) => {
   for (const r of db.prepare('SELECT r.id, r.code, r.name, r.floor_id, l.code AS lc, f.code AS fc FROM rooms r JOIN floors f ON f.id = r.floor_id JOIN locations l ON l.id = f.location_id WHERE UPPER(r.code) LIKE ? OR UPPER(r.name) LIKE ? LIMIT 5').all<{ id: number; code: string; name: string; floor_id: number; lc: string; fc: string }>(like, like))
     out.push({ kind: 'Room', id: r.id, path: `${r.lc}/${r.fc}/${r.code}`, name: r.name, sub: '', to: `/floors/${r.floor_id}?room=${r.id}` });
   for (const d of db.prepare(`SELECT d.id, d.name, d.serial, d.rack_id, d.floor_id, dt.name AS type_name, dt.is_rack, ${DEVICE_PATH} AS path ${DEVICE_JOIN}
-      WHERE UPPER(d.code) LIKE ? OR UPPER(d.name) LIKE ? OR UPPER(d.serial) LIKE ? OR UPPER(d.model) LIKE ? OR UPPER(d.manufacturer) LIKE ? LIMIT 15`).all<{ id: number; name: string; serial: string; rack_id: number | null; floor_id: number; type_name: string; is_rack: number; path: string }>(like, like, like, like, like))
+      WHERE UPPER(d.code) LIKE ? OR UPPER(d.name) LIKE ? OR UPPER(d.serial) LIKE ? OR UPPER(d.model) LIKE ? OR UPPER(d.manufacturer) LIKE ? OR UPPER(d.notes) LIKE ? LIMIT 15`).all<{ id: number; name: string; serial: string; rack_id: number | null; floor_id: number; type_name: string; is_rack: number; path: string }>(like, like, like, like, like, like))
     out.push({ kind: d.is_rack ? 'Rack' : d.rack_id ? 'Rack device' : 'Device', id: d.id, path: d.path, name: d.name, sub: d.type_name + (d.serial ? ` · SN ${d.serial}` : ''), to: d.is_rack ? `/racks/${d.id}` : d.rack_id ? `/racks/${d.rack_id}?device=${d.id}` : `/floors/${d.floor_id}?device=${d.id}` });
   for (const v of db.prepare('SELECT id, vid, name FROM vlans WHERE CAST(vid AS TEXT) LIKE ? OR UPPER(name) LIKE ? LIMIT 5').all<{ id: number; vid: number; name: string }>(like, like))
     out.push({ kind: 'VLAN', id: v.id, path: `VLAN ${v.vid}`, name: v.name, sub: '', to: `/networks/vlans` });

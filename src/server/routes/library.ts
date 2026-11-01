@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { db } from '../db.js';
 import { requireRole } from '../auth.js';
 import { badRequest, notFound } from '../errors.js';
-import { idParam, parse, textSchema } from '../util.js';
+import { idParam, parse, patchOf, textSchema } from '../util.js';
 import { logActivity } from '../activity.js';
 import { updateRow } from '../model.js';
 import { PORT_KINDS } from './devices.js';
@@ -39,7 +39,7 @@ libraryRouter.patch('/device-types/:id', edit, (req, res) => {
   const id = idParam(req);
   const t = db.prepare('SELECT * FROM device_types WHERE id = ?').get<{ is_builtin: number; name: string }>(id);
   if (!t) throw notFound('Device type not found');
-  const b = parse(typeBody.partial(), req.body);
+  const b = parse(patchOf(typeBody), req.body);
   if (t.is_builtin) { delete b.kind; delete b.passive; }
   db.transaction(() => {
     updateRow('device_types', id, { name: b.name, prefix: b.prefix, icon: b.icon, kind: b.kind, passive: b.passive === undefined ? undefined : b.passive ? 1 : 0 }, false);

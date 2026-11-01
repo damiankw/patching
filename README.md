@@ -13,6 +13,22 @@ Self-hosted network and rack documentation for internal use, modelled on the wor
 - **Device Library.** Standard device types with editable ID prefixes, custom types, and rack device templates with a port layout editor.
 - **Activity Log** with filters, **global search** (Ctrl K), light and dark themes, admin / editor / viewer roles.
 
+## AI Assistant
+
+The **AI Assistant** page lets you build and change the documentation in plain language, including from uploaded material: PDFs, photos of racks, CSV exports of spreadsheets, text notes. It runs on the Claude API from the server with your organisation's key, and works through the app's own API as the signed-in user: every change goes through the same validation as a manual edit and is recorded in the Activity Log under that user's name. It never deletes anything unless you explicitly ask.
+
+Set these where Rackdocs runs and restart:
+
+```bash
+ANTHROPIC_API_KEY=sk-ant-...          # required
+RACKDOCS_AI_MODEL=claude-opus-5-5      # optional, default shown
+RACKDOCS_AI_EFFORT=medium              # optional: low, medium, high
+```
+
+With Docker, put them in a `.env` file next to `docker-compose.yml` and add `env_file: .env` to the service, or pass them with `environment:`.
+
+What it can do: create locations, floors, rooms, racks and floor devices; mount rack devices from templates or create new templates; add building and user connections (it knows the keystone rule); create VLANs and WLANs and assign them to ports; rename, move and annotate devices; answer questions about what is connected where. Office files are not read directly: export Word and Excel documents to PDF or CSV first.
+
 ## Run with Docker
 
 ```bash
@@ -49,6 +65,9 @@ For development with hot reload (`npm run dev`), the web app is on port 5173 and
 | `PORT` | `3000` | HTTP port |
 | `DATA_DIR` | `./data` (or `/data` in Docker) | Folder holding `rackdocs.db` and `uploads/` |
 | `COOKIE_SECURE` | unset | Set to `1` when served over HTTPS so the session cookie is marked Secure |
+| `ANTHROPIC_API_KEY` | unset | Enables the AI Assistant |
+| `RACKDOCS_AI_MODEL` | `claude-opus-5-5` | Claude model used by the assistant |
+| `RACKDOCS_AI_EFFORT` | `medium` | Reasoning effort: `low`, `medium`, `high` |
 
 ## Quickstart
 

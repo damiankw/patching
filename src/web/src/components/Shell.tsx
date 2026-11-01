@@ -1,6 +1,6 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from 'react';
 import { Link, NavLink, Outlet, useNavigate } from 'react-router-dom';
-import { MapPin, Server, Globe, ListTree, History, Library, Users, Settings, Search, Menu as MenuIcon, BookOpen, ChevronsUpDown, ChevronRight, ChevronDown, Sun, Moon, LogOut, Bell, LifeBuoy, PanelLeftClose } from 'lucide-react';
+import { MapPin, Server, Globe, ListTree, History, Library, Users, Settings, Search, Sparkles, Menu as MenuIcon, BookOpen, ChevronsUpDown, ChevronRight, ChevronDown, Sun, Moon, LogOut, Bell, LifeBuoy, PanelLeftClose } from 'lucide-react';
 import { useAuth } from '../lib/auth';
 import { getTheme, toggleTheme } from '../lib/theme';
 import { CommandPalette } from './CommandPalette';
@@ -49,6 +49,7 @@ export function Shell() {
             {netOpen && <div className="nav-sub">{link('/networks/vlans', 'VLAN', Globe)}{link('/networks/wlans', 'WLAN', Globe)}</div>}
             {link('/resources', 'Resources', ListTree)}
             {link('/activity', 'Activity Log', History)}
+            {link('/assistant', 'AI Assistant', Sparkles)}
           </nav>
           <nav className="nav-group">
             {link('/library', 'Device Library', Library)}

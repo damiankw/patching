@@ -15,6 +15,7 @@ import { connectionsRouter } from './routes/connections.js';
 import { networksRouter } from './routes/networks.js';
 import { libraryRouter } from './routes/library.js';
 import { miscRouter } from './routes/misc.js';
+import { aiRouter } from './routes/ai.js';
 
 const app = express();
 app.disable('x-powered-by');
@@ -30,6 +31,7 @@ app.use('/api', connectionsRouter);
 app.use('/api', networksRouter);
 app.use('/api', libraryRouter);
 app.use('/api', miscRouter);
+app.use('/api', aiRouter);
 app.use('/api', (_req, res) => res.status(404).json({ error: 'Not found' }));
 
 const here = path.dirname(fileURLToPath(import.meta.url));

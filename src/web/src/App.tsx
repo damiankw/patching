@@ -15,6 +15,7 @@ import { DeviceLibrary } from './pages/DeviceLibrary';
 import { Users } from './pages/Users';
 import { Settings } from './pages/Settings';
 import { Report } from './pages/Report';
+import { Assistant } from './pages/Assistant';
 
 export function App() {
   const { user, loading, needsSetup } = useAuth(); const loc = useLocation();
@@ -37,6 +38,7 @@ export function App() {
         <Route path="/resources" element={<Resources />} />
         <Route path="/resources/:tab" element={<Resources />} />
         <Route path="/activity" element={<Activity />} />
+        <Route path="/assistant" element={<Assistant />} />
         <Route path="/library" element={<DeviceLibrary />} />
         <Route path="/library/:tab" element={<DeviceLibrary />} />
         <Route path="/users" element={user.role === 'admin' ? <Users /> : <Navigate to="/locations" replace />} />

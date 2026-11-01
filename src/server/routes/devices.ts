@@ -6,7 +6,7 @@ import path from 'node:path';
 import { db, UPLOAD_DIR } from '../db.js';
 import { requireRole } from '../auth.js';
 import { badRequest, notFound } from '../errors.js';
-import { codeSchema, idParam, parse, textSchema } from '../util.js';
+import { codeSchema, dateOpt, idParam, parse, textOpt, textSchema } from '../util.js';
 import { logActivity } from '../activity.js';
 import { DEVICE_COLS, DEVICE_JOIN, assertPlacement, findFreeSlot, codesInScope, connectionOfPort, getDevice, getPort, nextCode, peerOf, portState, portsOfDevice, roomForPoint, tracePort, updateRow, type DeviceRow } from '../model.js';
 import { deleteFile } from './locations.js';
@@ -97,11 +97,11 @@ devicesRouter.post('/racks/:id/devices', edit, (req, res) => {
 devicesRouter.get('/devices/:id', (req, res) => res.json(deviceDetail(idParam(req))));
 
 const patchBody = z.object({
-  code: codeSchema.optional(), name: textSchema.optional(), room_id: z.number().int().positive().nullable().optional(),
+  code: codeSchema.optional(), name: textOpt, room_id: z.number().int().positive().nullable().optional(),
   x: z.number().optional(), y: z.number().optional(), position_u: z.number().int().min(1).optional(), rack_id: z.number().int().positive().optional(), slot_x: z.number().int().min(0).max(100).optional(),
   height_u: z.number().int().min(1).max(60).optional(), device_type_id: z.number().int().positive().optional(),
-  manufacturer: textSchema.optional(), model: textSchema.optional(), serial: textSchema.optional(), purchase_date: dateStr.optional(), operation_start: dateStr.optional(),
-  responsible_user_id: userId, notes: textSchema.optional(),
+  manufacturer: textOpt, model: textOpt, serial: textOpt, purchase_date: dateOpt, operation_start: dateOpt,
+  responsible_user_id: userId, notes: textOpt,
 });
 devicesRouter.patch('/devices/:id', edit, (req, res) => {
   const id = idParam(req);
@@ -176,7 +176,7 @@ devicesRouter.patch('/ports/:id', edit, (req, res) => {
   const id = idParam(req);
   const b = parse(z.object({ name: z.string().trim().min(1).max(16).transform((s) => s.toUpperCase()).optional(), kind: z.enum(PORT_KINDS).optional(), face: z.enum(['front', 'rear']).optional(),
     wireless_mode: z.enum(['client', 'broadcast']).nullable().optional(), vlan_id: z.number().int().positive().nullable().optional(), wlan_id: z.number().int().positive().nullable().optional(),
-    speed: z.number().int().positive().nullable().optional(), notes: textSchema.optional() }), req.body);
+    speed: z.number().int().positive().nullable().optional(), notes: textOpt }), req.body);
   const p = getPort(id);
   if (b.vlan_id && !db.prepare('SELECT 1 FROM vlans WHERE id = ?').get(b.vlan_id)) throw notFound('VLAN not found');
   if (b.wlan_id && !db.prepare('SELECT 1 FROM wlans WHERE id = ?').get(b.wlan_id)) throw notFound('WLAN not found');

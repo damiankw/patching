@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { db } from '../db.js';
 import { requireRole } from '../auth.js';
 import { notFound } from '../errors.js';
-import { idParam, parse, textSchema } from '../util.js';
+import { idParam, parse, patchOf, textSchema } from '../util.js';
 import { logActivity } from '../activity.js';
 import { DEVICE_PATH, updateRow } from '../model.js';
 
@@ -26,7 +26,7 @@ networksRouter.post('/vlans', edit, (req, res) => {
   res.status(201).json(db.prepare('SELECT * FROM vlans WHERE id = ?').get(id));
 });
 networksRouter.patch('/vlans/:id', edit, (req, res) => {
-  const id = idParam(req); const b = parse(vlanBody.partial(), req.body);
+  const id = idParam(req); const b = parse(patchOf(vlanBody), req.body);
   if (!db.prepare('SELECT 1 FROM vlans WHERE id = ?').get(id)) throw notFound('VLAN not found');
   updateRow('vlans', id, b);
   const v = db.prepare('SELECT * FROM vlans WHERE id = ?').get<{ vid: number; name: string }>(id)!;
@@ -52,7 +52,7 @@ networksRouter.post('/wlans', edit, (req, res) => {
   res.status(201).json(db.prepare('SELECT * FROM wlans WHERE id = ?').get(id));
 });
 networksRouter.patch('/wlans/:id', edit, (req, res) => {
-  const id = idParam(req); const b = parse(wlanBody.partial(), req.body);
+  const id = idParam(req); const b = parse(patchOf(wlanBody), req.body);
   if (!db.prepare('SELECT 1 FROM wlans WHERE id = ?').get(id)) throw notFound('WLAN not found');
   updateRow('wlans', id, b);
   const w = db.prepare('SELECT * FROM wlans WHERE id = ?').get<{ ssid: string }>(id)!;

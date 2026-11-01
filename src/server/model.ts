@@ -178,3 +178,32 @@ export function findFreeSlot(rackId: number, positionU: number, heightU: number,
   }
   return null;
 }
+
+/** Resolve a resource path like HQ/27/MDF/RK01/PP01/01 (or a prefix of it) to a row. */
+export function resolvePath(input: string): { kind: 'location' | 'floor' | 'room' | 'device' | 'port'; id: number; path: string } | null {
+  const parts = input.trim().toUpperCase().split('/').filter(Boolean);
+  if (!parts.length) return null;
+  const loc = db.prepare('SELECT id FROM locations WHERE UPPER(code) = ?').get<{ id: number }>(parts[0]);
+  if (!loc) return null;
+  if (parts.length === 1) return { kind: 'location', id: loc.id, path: parts[0] };
+  const floor = db.prepare('SELECT id FROM floors WHERE location_id = ? AND UPPER(code) = ?').get<{ id: number }>(loc.id, parts[1]);
+  if (!floor) return null;
+  if (parts.length === 2) return { kind: 'floor', id: floor.id, path: parts.slice(0, 2).join('/') };
+  const roomCode = parts[2];
+  const room = roomCode === 'DEFAULT' ? { id: null as number | null } : db.prepare('SELECT id FROM rooms WHERE floor_id = ? AND UPPER(code) = ?').get<{ id: number }>(floor.id, roomCode);
+  if (!room) return null;
+  if (parts.length === 3) return room.id === null ? { kind: 'floor', id: floor.id, path: parts.slice(0, 2).join('/') } : { kind: 'room', id: room.id, path: parts.slice(0, 3).join('/') };
+  // parts[3] is a floor device (possibly a rack)
+  const dev = db.prepare('SELECT id FROM devices WHERE floor_id = ? AND rack_id IS NULL AND COALESCE(room_id, 0) = COALESCE(?, 0) AND UPPER(code) = ?').get<{ id: number }>(floor.id, room.id, parts[3]);
+  if (!dev) return null;
+  if (parts.length === 4) return { kind: 'device', id: dev.id, path: parts.slice(0, 4).join('/') };
+  // parts[4]: either a port of the floor device, or a device inside the rack
+  const inRack = db.prepare('SELECT id FROM devices WHERE rack_id = ? AND UPPER(code) = ?').get<{ id: number }>(dev.id, parts[4]);
+  if (inRack) {
+    if (parts.length === 5) return { kind: 'device', id: inRack.id, path: parts.slice(0, 5).join('/') };
+    const port = db.prepare('SELECT id FROM ports WHERE device_id = ? AND UPPER(name) = ?').get<{ id: number }>(inRack.id, parts[5]);
+    return port ? { kind: 'port', id: port.id, path: parts.slice(0, 6).join('/') } : null;
+  }
+  const port = db.prepare('SELECT id FROM ports WHERE device_id = ? AND UPPER(name) = ?').get<{ id: number }>(dev.id, parts[4]);
+  return port && parts.length === 5 ? { kind: 'port', id: port.id, path: parts.slice(0, 5).join('/') } : null;
+}
