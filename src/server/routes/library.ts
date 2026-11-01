@@ -76,14 +76,14 @@ function templatesOut(id?: number) {
   return tpls.map((t) => ({ ...t, ports: ports.filter((p) => p.template_id === t.id) }));
 }
 libraryRouter.get('/templates', (_req, res) => res.json(templatesOut()));
-const tplBody = z.object({ name: z.string().trim().min(1).max(100), device_type_id: z.number().int().positive(), brand: textSchema, model: textSchema, height_u: z.number().int().min(1).max(50), color: textSchema, ports: z.array(portSchema).max(500).default([]) });
+const tplBody = z.object({ name: z.string().trim().min(1).max(100), device_type_id: z.number().int().positive(), brand: textSchema, model: textSchema, height_u: z.number().int().min(1).max(50), width_pct: z.number().int().min(10).max(100).default(100), color: textSchema, ports: z.array(portSchema).max(500).default([]) });
 function checkPorts(ports: z.infer<typeof portSchema>[]) { const s = new Set<string>(); for (const p of ports) { if (s.has(p.name)) throw badRequest(`Duplicate port name ${p.name}`); s.add(p.name); } }
 libraryRouter.post('/templates', edit, (req, res) => {
   const b = parse(tplBody, req.body); checkPorts(b.ports);
   const t = db.prepare("SELECT kind FROM device_types WHERE id = ?").get<{ kind: string }>(b.device_type_id);
   if (!t || t.kind !== 'rack') throw badRequest('Choose a rack device type');
   const id = db.transaction(() => {
-    const r = db.prepare('INSERT INTO templates (device_type_id, name, brand, model, height_u, color, is_builtin) VALUES (?, ?, ?, ?, ?, ?, 0)').run(b.device_type_id, b.name, b.brand, b.model, b.height_u, b.color).lastInsertRowid;
+    const r = db.prepare('INSERT INTO templates (device_type_id, name, brand, model, height_u, width_pct, color, is_builtin) VALUES (?, ?, ?, ?, ?, ?, ?, 0)').run(b.device_type_id, b.name, b.brand, b.model, b.height_u, b.width_pct, b.color).lastInsertRowid;
     b.ports.forEach((p, i) => db.prepare('INSERT INTO template_ports (template_id, name, kind, face, sort) VALUES (?, ?, ?, ?, ?)').run(r, p.name, p.kind, p.face, i));
     return r;
   })();
@@ -96,7 +96,7 @@ libraryRouter.put('/templates/:id', edit, (req, res) => {
   if (!existing) throw notFound('Template not found');
   const b = parse(tplBody, req.body); checkPorts(b.ports);
   db.transaction(() => {
-    db.prepare("UPDATE templates SET name = ?, device_type_id = ?, brand = ?, model = ?, height_u = ?, color = ?, updated_at = datetime('now') WHERE id = ?").run(b.name, b.device_type_id, b.brand, b.model, b.height_u, b.color, id);
+    db.prepare("UPDATE templates SET name = ?, device_type_id = ?, brand = ?, model = ?, height_u = ?, width_pct = ?, color = ?, updated_at = datetime('now') WHERE id = ?").run(b.name, b.device_type_id, b.brand, b.model, b.height_u, b.width_pct, b.color, id);
     db.prepare('DELETE FROM template_ports WHERE template_id = ?').run(id);
     b.ports.forEach((p, i) => db.prepare('INSERT INTO template_ports (template_id, name, kind, face, sort) VALUES (?, ?, ?, ?, ?)').run(id, p.name, p.kind, p.face, i));
   })();
@@ -105,12 +105,12 @@ libraryRouter.put('/templates/:id', edit, (req, res) => {
 });
 libraryRouter.post('/templates/:id/duplicate', edit, (req, res) => {
   const id = idParam(req);
-  const src = templatesOut(id)[0] as unknown as { name: string; device_type_id: number; brand: string; model: string; height_u: number; color: string; ports: { name: string; kind: string; face: string }[] } | undefined;
+  const src = templatesOut(id)[0] as unknown as { name: string; device_type_id: number; brand: string; model: string; height_u: number; width_pct: number; color: string; ports: { name: string; kind: string; face: string }[] } | undefined;
   if (!src) throw notFound('Template not found');
   let name = `${src.name} (copy)`; let n = 2;
   while (db.prepare('SELECT 1 FROM templates WHERE name = ?').get(name)) name = `${src.name} (copy ${n++})`;
   const nid = db.transaction(() => {
-    const r = db.prepare('INSERT INTO templates (device_type_id, name, brand, model, height_u, color, is_builtin) VALUES (?, ?, ?, ?, ?, ?, 0)').run(src.device_type_id, name, src.brand, src.model, src.height_u, src.color).lastInsertRowid;
+    const r = db.prepare('INSERT INTO templates (device_type_id, name, brand, model, height_u, width_pct, color, is_builtin) VALUES (?, ?, ?, ?, ?, ?, ?, 0)').run(src.device_type_id, name, src.brand, src.model, src.height_u, src.width_pct, src.color).lastInsertRowid;
     src.ports.forEach((p, i) => db.prepare('INSERT INTO template_ports (template_id, name, kind, face, sort) VALUES (?, ?, ?, ?, ?)').run(r, p.name, p.kind, p.face, i));
     return r;
   })();

@@ -12,16 +12,16 @@ export const DEVICE_JOIN = `
   LEFT JOIN devices rk ON rk.id = d.rack_id
   LEFT JOIN users ru ON ru.id = d.responsible_user_id`;
 export const DEVICE_PATH = `l.code || '/' || f.code || '/' || COALESCE(ro.code, 'DEFAULT') || '/' || CASE WHEN rk.id IS NOT NULL THEN rk.code || '/' ELSE '' END || d.code`;
-export const DEVICE_COLS = `d.*, dt.name AS type_name, dt.prefix AS type_prefix, dt.kind AS type_kind, dt.icon AS type_icon, dt.passive AS passive, dt.is_rack AS is_rack,
+export const DEVICE_COLS = `d.*, dt.name AS type_name, dt.prefix AS type_prefix, dt.kind AS type_kind, dt.icon AS type_icon, dt.passive AS passive, dt.is_rack AS is_rack, dt.is_tray AS is_tray,
   t.name AS template_name, ro.code AS room_code, f.code AS floor_code, f.location_id, l.code AS location_code, l.name AS location_name,
   rk.code AS rack_code, rk.x AS rack_x, rk.y AS rack_y, ru.name AS responsible_name, ${DEVICE_PATH} AS path`;
 
 export interface DeviceRow {
   id: number; floor_id: number; room_id: number | null; rack_id: number | null; device_type_id: number; template_id: number | null;
-  code: string; name: string; x: number; y: number; position_u: number | null; height_u: number;
+  code: string; name: string; x: number; y: number; position_u: number | null; height_u: number; width_pct: number; slot_x: number;
   manufacturer: string; model: string; serial: string; purchase_date: string; operation_start: string; responsible_user_id: number | null; notes: string;
   created_at: string; updated_at: string;
-  type_name: string; type_prefix: string; type_kind: 'floor' | 'rack'; type_icon: string; passive: number; is_rack: number; template_name: string | null;
+  type_name: string; type_prefix: string; type_kind: 'floor' | 'rack'; type_icon: string; passive: number; is_rack: number; is_tray: number; template_name: string | null;
   room_code: string | null; floor_code: string; location_id: number; location_code: string; location_name: string;
   rack_code: string | null; rack_x: number | null; rack_y: number | null; responsible_name: string | null; path: string;
 }
@@ -157,12 +157,24 @@ export function updateRow(table: string, id: number, fields: Record<string, unkn
   if (withUpdated) sets.push("updated_at = datetime('now')");
   db.prepare(`UPDATE ${table} SET ${sets.join(', ')} WHERE id = ?`).run(...keys.map((k) => fields[k]), id);
 }
-export function assertPlacement(rackId: number, positionU: number, heightU: number, excludeId: number | null) {
+export function assertPlacement(rackId: number, positionU: number, heightU: number, excludeId: number | null, widthPct = 100, slotX = 0, isTray = false) {
   const rack = db.prepare('SELECT height_u, code FROM devices WHERE id = ?').get<{ height_u: number; code: string }>(rackId);
   if (!rack) throw notFound('Rack not found');
   const top = positionU + heightU - 1;
   if (positionU < 1 || top > rack.height_u) throw badRequest(`Device would occupy U${positionU}-U${top}; rack ${rack.code} has ${rack.height_u} units`);
-  const clash = db.prepare(`SELECT code FROM devices WHERE rack_id = ? AND (? IS NULL OR id <> ?) AND position_u <= ? AND ? <= position_u + height_u - 1 LIMIT 1`)
-    .get<{ code: string }>(rackId, excludeId, excludeId, top, positionU);
+  if (slotX < 0 || slotX + widthPct > 100) throw badRequest('Device does not fit within the rack width at that position');
+  // A tray only clashes with other trays; devices never clash with trays (they sit on them).
+  const clash = db.prepare(`SELECT d.code FROM devices d JOIN device_types dt ON dt.id = d.device_type_id WHERE d.rack_id = ? AND (? IS NULL OR d.id <> ?)
+      AND d.position_u <= ? AND ? <= d.position_u + d.height_u - 1 AND d.slot_x < ? AND ? < d.slot_x + d.width_pct AND dt.is_tray = ? LIMIT 1`)
+    .get<{ code: string }>(rackId, excludeId, excludeId, top, positionU, slotX + widthPct, slotX, isTray ? 1 : 0);
   if (clash) throw badRequest(`Overlaps ${clash.code} in rack ${rack.code}`);
+}
+/** Leftmost horizontal slot (in 1/12 steps) where a device of this size fits across the U range, or null. */
+export function findFreeSlot(rackId: number, positionU: number, heightU: number, widthPct: number, excludeId: number | null, isTray = false): number | null {
+  for (let step = 0; step <= 12; step++) {
+    const x = Math.round((step * 100) / 12);
+    if (x + widthPct > 100) break;
+    try { assertPlacement(rackId, positionU, heightU, excludeId, widthPct, x, isTray); return x; } catch { /* try next */ }
+  }
+  return null;
 }

@@ -134,6 +134,7 @@ CREATE TABLE IF NOT EXISTS device_types (
   icon TEXT NOT NULL DEFAULT 'box',
   passive INTEGER NOT NULL DEFAULT 0,
   is_rack INTEGER NOT NULL DEFAULT 0,
+  is_tray INTEGER NOT NULL DEFAULT 0,
   is_builtin INTEGER NOT NULL DEFAULT 0,
   sort INTEGER NOT NULL DEFAULT 0
 );
@@ -153,6 +154,7 @@ CREATE TABLE IF NOT EXISTS templates (
   brand TEXT NOT NULL DEFAULT '',
   model TEXT NOT NULL DEFAULT '',
   height_u INTEGER NOT NULL DEFAULT 1,
+  width_pct INTEGER NOT NULL DEFAULT 100,
   color TEXT NOT NULL DEFAULT '',
   is_builtin INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -180,6 +182,8 @@ CREATE TABLE IF NOT EXISTS devices (
   y REAL NOT NULL DEFAULT 0,
   position_u INTEGER,
   height_u INTEGER NOT NULL DEFAULT 1,
+  width_pct INTEGER NOT NULL DEFAULT 100,
+  slot_x INTEGER NOT NULL DEFAULT 0,
   manufacturer TEXT NOT NULL DEFAULT '',
   model TEXT NOT NULL DEFAULT '',
   serial TEXT NOT NULL DEFAULT '',
@@ -262,6 +266,16 @@ CREATE INDEX IF NOT EXISTS idx_activity_created ON activity_log(id DESC);
 db.exec(SCHEMA);
 db.prepare("INSERT OR IGNORE INTO schema_meta (key, value) VALUES ('version', '2')").run();
 
+/** Additive migrations for databases created by earlier v2 builds. */
+function addColumnIfMissing(table: string, column: string, ddl: string) {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all<{ name: string }>().map((c) => c.name);
+  if (!cols.includes(column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`);
+}
+addColumnIfMissing('templates', 'width_pct', 'INTEGER NOT NULL DEFAULT 100');
+addColumnIfMissing('devices', 'width_pct', 'INTEGER NOT NULL DEFAULT 100');
+addColumnIfMissing('devices', 'slot_x', 'INTEGER NOT NULL DEFAULT 0');
+addColumnIfMissing('device_types', 'is_tray', 'INTEGER NOT NULL DEFAULT 0');
+
 export function getMeta(key: string, fallback = ''): string {
   const r = db.prepare('SELECT value FROM schema_meta WHERE key = ?').get<{ value: string }>(key);
   return r?.value ?? fallback;
@@ -289,18 +303,19 @@ const FLOOR_TYPES: { name: string; prefix: string; icon: string; passive?: boole
   { name: 'Rack', prefix: 'RK', icon: 'server', is_rack: true, ports: [] },
   { name: 'Screen', prefix: 'SCR', icon: 'tv', ports: [r('', 1, 1, 'rj45')] },
 ];
-const RACK_TYPES: { name: string; prefix: string; icon: string; passive?: boolean }[] = [
+const RACK_TYPES: { name: string; prefix: string; icon: string; passive?: boolean; is_tray?: boolean }[] = [
   { name: 'Cable Manager', prefix: 'CM', icon: 'cable' },
   { name: 'Firewall', prefix: 'FW', icon: 'shield' },
   { name: 'Miscellaneous', prefix: 'MISC', icon: 'box' },
   { name: 'Patch Panel', prefix: 'PP', icon: 'ellipsis', passive: true },
+  { name: 'Rack Tray', prefix: 'TR', icon: 'box', is_tray: true },
   { name: 'Router', prefix: 'RT', icon: 'route' },
   { name: 'Server', prefix: 'SRV', icon: 'hard-drive' },
   { name: 'SFP Device', prefix: 'SFP', icon: 'usb' },
   { name: 'Switch', prefix: 'SW', icon: 'network' },
   { name: 'UPS', prefix: 'UPS', icon: 'battery-charging' },
 ];
-const TEMPLATES: { type: string; name: string; height_u: number; ports: PortSeed[] }[] = [
+const TEMPLATES: { type: string; name: string; height_u: number; width_pct?: number; ports: PortSeed[] }[] = [
   { type: 'Patch Panel', name: 'Patch Panel - 24 Ports - RJ45', height_u: 1, ports: [r('', 1, 24, 'rj45')] },
   { type: 'Patch Panel', name: 'Patch Panel - 48 Ports - RJ45', height_u: 2, ports: [r('', 1, 48, 'rj45')] },
   { type: 'Patch Panel', name: 'Patch Panel - 12 Ports - LC', height_u: 1, ports: [r('', 1, 12, 'lc')] },
@@ -320,13 +335,19 @@ const TEMPLATES: { type: string; name: string; height_u: number; ports: PortSeed
   { type: 'Miscellaneous', name: 'Blank Panel - 1U', height_u: 1, ports: [] },
   { type: 'Miscellaneous', name: 'Shelf - 1U', height_u: 1, ports: [] },
   { type: 'Miscellaneous', name: 'KVM - 1U', height_u: 1, ports: [r('', 1, 8, 'other')] },
+  { type: 'Rack Tray', name: 'Rack Tray - 1U', height_u: 1, width_pct: 100, ports: [] },
+  { type: 'Rack Tray', name: 'Rack Tray - 2U', height_u: 2, width_pct: 100, ports: [] },
+  { type: 'Server', name: 'Server - 1U - 1/2 width', height_u: 1, width_pct: 50, ports: [{ names: ['ETH1', 'ETH2'], kind: 'rj45', face: 'rear' }, { names: ['PSU'], kind: 'power', face: 'rear' }] },
+  { type: 'Server', name: 'Desktop NAS - 4U - 1/3 width', height_u: 4, width_pct: 33, ports: [{ names: ['ETH1', 'ETH2'], kind: 'rj45', face: 'rear' }, { names: ['PSU'], kind: 'power', face: 'rear' }] },
+  { type: 'Miscellaneous', name: 'Mini PC - 1U - 1/3 width', height_u: 1, width_pct: 33, ports: [{ names: ['ETH1'], kind: 'rj45', face: 'rear' }, { names: ['HDMI'], kind: 'hdmi', face: 'rear' }] },
+  { type: 'Miscellaneous', name: 'CCTV recorder - 2U - 1/2 width', height_u: 2, width_pct: 50, ports: [{ names: ['ETH1'], kind: 'rj45', face: 'rear' }, { names: ['HDMI', 'VGA'], kind: 'hdmi', face: 'rear' }, r('CAM', 1, 8, 'other', 'rear', 1)] },
 ];
 
 export function seed() {
   if (db.prepare('SELECT 1 FROM device_types LIMIT 1').get()) return;
   const insType = db.prepare('INSERT INTO device_types (name, prefix, kind, icon, passive, is_rack, is_builtin, sort) VALUES (?, ?, ?, ?, ?, ?, 1, ?)');
   const insTypePort = db.prepare('INSERT INTO device_type_ports (device_type_id, name, kind, face, wireless_mode, sort) VALUES (?, ?, ?, ?, ?, ?)');
-  const insTpl = db.prepare('INSERT INTO templates (device_type_id, name, height_u, is_builtin) VALUES (?, ?, ?, 1)');
+  const insTpl = db.prepare('INSERT INTO templates (device_type_id, name, height_u, width_pct, is_builtin) VALUES (?, ?, ?, ?, 1)');
   const insTplPort = db.prepare('INSERT INTO template_ports (template_id, name, kind, face, sort) VALUES (?, ?, ?, ?, ?)');
   db.transaction(() => {
     const typeIds = new Map<string, number>();
@@ -336,12 +357,25 @@ export function seed() {
       let sort = 0;
       for (const p of t.ports) for (const n of p.names) insTypePort.run(id, n, p.kind, p.face ?? 'front', p.wireless_mode ?? null, sort++);
     });
-    RACK_TYPES.forEach((t, i) => typeIds.set(t.name, insType.run(t.name, t.prefix, 'rack', t.icon, t.passive ? 1 : 0, 0, i).lastInsertRowid));
+    RACK_TYPES.forEach((t, i) => { const id = insType.run(t.name, t.prefix, 'rack', t.icon, t.passive ? 1 : 0, 0, i).lastInsertRowid; if (t.is_tray) db.prepare('UPDATE device_types SET is_tray = 1 WHERE id = ?').run(id); typeIds.set(t.name, id); });
     for (const t of TEMPLATES) {
-      const id = insTpl.run(typeIds.get(t.type)!, t.name, t.height_u).lastInsertRowid;
+      const id = insTpl.run(typeIds.get(t.type)!, t.name, t.height_u, t.width_pct ?? 100).lastInsertRowid;
       let sort = 0;
       for (const p of t.ports) for (const n of p.names) insTplPort.run(id, n, p.kind, p.face ?? 'front', sort++);
     }
   })();
 }
 seed();
+/** Templates added after the first v2 release: insert into existing databases if absent. */
+function seedNewTemplates() {
+  if (!db.prepare("SELECT 1 FROM device_types WHERE name = 'Rack Tray'").get()) db.prepare("INSERT INTO device_types (name, prefix, kind, icon, passive, is_rack, is_tray, is_builtin, sort) VALUES ('Rack Tray', 'TR', 'rack', 'box', 0, 0, 1, 1, 4)").run();
+  const ins = db.prepare('INSERT INTO templates (device_type_id, name, height_u, width_pct, is_builtin) VALUES (?, ?, ?, ?, 1)');
+  const insPort = db.prepare('INSERT INTO template_ports (template_id, name, kind, face, sort) VALUES (?, ?, ?, ?, ?)');
+  for (const t of TEMPLATES.filter((x) => x.width_pct !== undefined)) {
+    if (db.prepare('SELECT 1 FROM templates WHERE name = ?').get(t.name)) continue;
+    const type = db.prepare('SELECT id FROM device_types WHERE name = ?').get<{ id: number }>(t.type); if (!type) continue;
+    const id = ins.run(type.id, t.name, t.height_u, t.width_pct ?? 100).lastInsertRowid;
+    let sort = 0; for (const p of t.ports) for (const n of p.names) insPort.run(id, n, p.kind, p.face ?? 'front', sort++);
+  }
+}
+seedNewTemplates();

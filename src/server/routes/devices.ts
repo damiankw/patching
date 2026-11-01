@@ -8,7 +8,7 @@ import { requireRole } from '../auth.js';
 import { badRequest, notFound } from '../errors.js';
 import { codeSchema, idParam, parse, textSchema } from '../util.js';
 import { logActivity } from '../activity.js';
-import { DEVICE_COLS, DEVICE_JOIN, assertPlacement, codesInScope, connectionOfPort, getDevice, getPort, nextCode, peerOf, portState, portsOfDevice, roomForPoint, tracePort, updateRow, type DeviceRow } from '../model.js';
+import { DEVICE_COLS, DEVICE_JOIN, assertPlacement, findFreeSlot, codesInScope, connectionOfPort, getDevice, getPort, nextCode, peerOf, portState, portsOfDevice, roomForPoint, tracePort, updateRow, type DeviceRow } from '../model.js';
 import { deleteFile } from './locations.js';
 
 export const devicesRouter = Router();
@@ -76,19 +76,21 @@ devicesRouter.post('/racks/:id/devices', edit, (req, res) => {
   const rackId = idParam(req);
   const rack = getDevice(rackId);
   if (!rack.is_rack) throw badRequest('Target is not a rack');
-  const b = parse(z.object({ template_id: z.number().int().positive(), code: codeSchema.optional(), name: textSchema, position_u: z.number().int().min(1) }), req.body);
-  const tpl = db.prepare('SELECT t.*, dt.prefix, dt.name AS type_name FROM templates t JOIN device_types dt ON dt.id = t.device_type_id WHERE t.id = ?').get<{ id: number; device_type_id: number; height_u: number; prefix: string; name: string; type_name: string }>(b.template_id);
+  const b = parse(z.object({ template_id: z.number().int().positive(), code: codeSchema.optional(), name: textSchema, position_u: z.number().int().min(1), slot_x: z.number().int().min(0).max(100).optional() }), req.body);
+  const tpl = db.prepare('SELECT t.*, dt.prefix, dt.name AS type_name, dt.is_tray FROM templates t JOIN device_types dt ON dt.id = t.device_type_id WHERE t.id = ?').get<{ id: number; device_type_id: number; height_u: number; width_pct: number; prefix: string; name: string; type_name: string; is_tray: number }>(b.template_id);
   if (!tpl) throw notFound('Template not found');
-  assertPlacement(rackId, b.position_u, tpl.height_u, null);
+  const slotX = b.slot_x ?? findFreeSlot(rackId, b.position_u, tpl.height_u, tpl.width_pct, null, !!tpl.is_tray);
+  if (slotX === null) throw badRequest(`No room for a ${tpl.width_pct}% wide device at U${b.position_u}`);
+  assertPlacement(rackId, b.position_u, tpl.height_u, null, tpl.width_pct, slotX, !!tpl.is_tray);
   const code = b.code ?? nextCode(tpl.prefix, codesInScope(rack.floor_id, rack.room_id, rackId));
   const id = db.transaction(() => {
-    const r = db.prepare('INSERT INTO devices (floor_id, room_id, rack_id, device_type_id, template_id, code, name, x, y, position_u, height_u) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
-      .run(rack.floor_id, rack.room_id, rackId, tpl.device_type_id, tpl.id, code, b.name, rack.x, rack.y, b.position_u, tpl.height_u).lastInsertRowid;
+    const r = db.prepare('INSERT INTO devices (floor_id, room_id, rack_id, device_type_id, template_id, code, name, x, y, position_u, height_u, width_pct, slot_x) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(rack.floor_id, rack.room_id, rackId, tpl.device_type_id, tpl.id, code, b.name, rack.x, rack.y, b.position_u, tpl.height_u, tpl.width_pct, slotX).lastInsertRowid;
     createPortsFromTypeOrTemplate(r, tpl.device_type_id, tpl.id);
     return r;
   })();
   const d = getDevice(id);
-  logActivity(req, 'create', 'rack_device', id, d.path, { template: tpl.name, position_u: b.position_u });
+  logActivity(req, 'create', 'rack_device', id, d.path, { template: tpl.name, position_u: b.position_u, slot_x: slotX });
   res.status(201).json(deviceDetail(id));
 });
 
@@ -96,7 +98,7 @@ devicesRouter.get('/devices/:id', (req, res) => res.json(deviceDetail(idParam(re
 
 const patchBody = z.object({
   code: codeSchema.optional(), name: textSchema.optional(), room_id: z.number().int().positive().nullable().optional(),
-  x: z.number().optional(), y: z.number().optional(), position_u: z.number().int().min(1).optional(), rack_id: z.number().int().positive().optional(),
+  x: z.number().optional(), y: z.number().optional(), position_u: z.number().int().min(1).optional(), rack_id: z.number().int().positive().optional(), slot_x: z.number().int().min(0).max(100).optional(),
   height_u: z.number().int().min(1).max(60).optional(), device_type_id: z.number().int().positive().optional(),
   manufacturer: textSchema.optional(), model: textSchema.optional(), serial: textSchema.optional(), purchase_date: dateStr.optional(), operation_start: dateStr.optional(),
   responsible_user_id: userId, notes: textSchema.optional(),
@@ -111,8 +113,9 @@ devicesRouter.patch('/devices/:id', edit, (req, res) => {
     // rack-mounted device
     const rackId = b.rack_id ?? d.rack_id;
     const pos = b.position_u ?? d.position_u ?? 1;
-    if (b.rack_id !== undefined || b.position_u !== undefined) {
-      assertPlacement(rackId, pos, d.height_u, id);
+    const slotX = b.slot_x ?? d.slot_x;
+    if (b.rack_id !== undefined || b.position_u !== undefined || b.slot_x !== undefined) {
+      assertPlacement(rackId, pos, d.height_u, id, d.width_pct, slotX, !!d.is_tray);
       if (b.rack_id !== undefined && b.rack_id !== d.rack_id) {
         const target = getDevice(b.rack_id); if (!target.is_rack) throw badRequest('Target is not a rack');
         Object.assign(fields, { floor_id: target.floor_id, room_id: target.room_id, x: target.x, y: target.y }); action = 'move';
@@ -120,7 +123,7 @@ devicesRouter.patch('/devices/:id', edit, (req, res) => {
     }
     delete fields.height_u; delete fields.device_type_id;
   } else {
-    delete fields.rack_id; delete fields.position_u;
+    delete fields.rack_id; delete fields.position_u; delete fields.slot_x;
     if (b.x !== undefined || b.y !== undefined) {
       const x = b.x ?? d.x, y = b.y ?? d.y;
       if (b.room_id === undefined) fields.room_id = roomForPoint(d.floor_id, x, y);
