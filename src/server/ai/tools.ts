@@ -34,9 +34,15 @@ function compactDevice(d: DeviceRow & { ports?: { name: string; kind: string; fa
     ports: d.ports?.map((p) => ({ name: p.name, kind: p.kind, face: p.face, state: p.state, keystone: p.keystone || undefined, user: p.user_peer?.path, building: p.building_peer?.path, vlan: p.vlan_vid ?? undefined })) };
 }
 
-export function makeTools(ctx: ToolContext) {
-  const T = <S extends z.ZodType>(name: string, description: string, inputSchema: S, run: (input: z.infer<S>) => Promise<unknown>) =>
-    betaZodTool({ name, description, inputSchema, eager_input_streaming: true, run: async (input) => {
+export interface ToolSpec { name: string; description: string; schema: z.ZodObject<z.ZodRawShape>; run: (input: unknown) => Promise<string> }
+
+/** Provider-neutral tool table. `run` always returns a string; failures come back as "ERROR: …" so any model can react. */
+export function defineTools(ctx: ToolContext): ToolSpec[] {
+  const T = <S extends z.ZodObject<z.ZodRawShape>>(name: string, description: string, schema: S, run: (input: z.infer<S>) => Promise<unknown>): ToolSpec =>
+    ({ name, description, schema, run: async (raw: unknown) => {
+      const parsed = schema.safeParse(raw);
+      if (!parsed.success) { const msg = `ERROR: invalid input for ${name}: ${parsed.error.issues.map((i) => `${i.path.join('.') || 'input'} ${i.message}`).join('; ')}`; ctx.emit({ type: 'tool_result', name, ok: false, result: msg }); return msg; }
+      const input = parsed.data as z.infer<S>;
       ctx.emit({ type: 'tool_start', name, input });
       try { const out = await run(input); const text = typeof out === 'string' ? out : j(out); ctx.emit({ type: 'tool_result', name, ok: true, result: text.length > 400 ? text.slice(0, 400) + '…' : text }); return text; }
       catch (e) { const msg = `ERROR: ${e instanceof Error ? e.message : String(e)}`; ctx.emit({ type: 'tool_result', name, ok: false, result: msg }); return msg; }
@@ -139,4 +145,15 @@ export function makeTools(ctx: ToolContext) {
     }),
     T('create_device_type', 'Create a custom floor device type (e.g. PLC, Sensor) with a prefix and default ports.', z.object({ name: z.string(), prefix: z.string(), kind: z.enum(['floor', 'rack']).default('floor'), ports: z.array(z.string()).default(['01:rj45']).describe('e.g. ["01:rj45", "W01:wireless"]') }), (i) => call(ctx, 'POST', '/device-types', { name: i.name, prefix: i.prefix, kind: i.kind, icon: 'box', passive: false, ports: i.ports.map((s) => { const [name, kind = 'rj45'] = s.split(':'); return { name, kind, face: 'front', wireless_mode: kind === 'wireless' ? 'client' : null }; }) })),
   ];
+}
+
+/** Anthropic SDK tool-runner tools. */
+export function makeTools(ctx: ToolContext) {
+  return defineTools(ctx).map((t) => betaZodTool({ name: t.name, description: t.description, inputSchema: t.schema, eager_input_streaming: true, run: (input) => t.run(input) }));
+}
+/** OpenAI-compatible (OpenRouter) function definitions plus a runner map. */
+export function openaiTools(ctx: ToolContext) {
+  const specs = defineTools(ctx);
+  const defs = specs.map((t) => ({ type: 'function' as const, function: { name: t.name, description: t.description, parameters: z.toJSONSchema(t.schema) as Record<string, unknown> } }));
+  return { defs, runners: new Map(specs.map((t) => [t.name, t])) };
 }

@@ -15,7 +15,7 @@ const SUGGESTIONS = ['Set up a location called HQ with floors G and 1, a comms r
 
 export function Assistant() {
   const qc = useQueryClient(); const toast = useToast(); const canEdit = useCanEdit();
-  const status = useQuery({ queryKey: ['ai-status'], queryFn: () => api.get<{ enabled: boolean; model: string }>('/ai/status') });
+  const status = useQuery({ queryKey: ['ai-status'], queryFn: () => api.get<{ enabled: boolean; model: string; provider: string }>('/ai/status') });
   const convos = useQuery({ queryKey: ['ai-convos'], queryFn: () => api.get<Convo[]>('/ai/conversations') });
   const [current, setCurrent] = useState<number | null>(null);
   const [events, setEvents] = useState<Ev[]>([]); const [text, setText] = useState(''); const [atts, setAtts] = useState<Att[]>([]); const [busy, setBusy] = useState(false); const [del, setDel] = useState<Convo | null>(null);
@@ -63,7 +63,7 @@ export function Assistant() {
       {convos.data?.length === 0 && <div className="muted small" style={{ padding: 10 }}>No conversations yet.</div>}
     </aside>
     <div className="ai-main">
-      {!status.data?.enabled && <div className="ai-banner">The assistant needs an Anthropic API key on the server. Set <code>ANTHROPIC_API_KEY</code> (and optionally <code>RACKDOCS_AI_MODEL</code>) and restart. See <Link to="/settings">Settings</Link>.</div>}
+      {!status.data?.enabled && <div className="ai-banner">The assistant needs a model API key on the server: set <code>OPENROUTER_API_KEY</code> (and <code>RACKDOCS_AI_MODEL</code>) or <code>ANTHROPIC_API_KEY</code>, then restart. See <Link to="/settings">Settings</Link>.</div>}
       <div className="ai-messages">
         {events.length === 0 && <div className="ai-empty"><Sparkles size={28} className="muted" /><h2>What would you like to document?</h2><p className="muted">Describe your network in plain language or attach exports, PDFs, notes and rack photos. The assistant reads them and builds locations, racks, devices, cabling and VLANs through the same checks you use, and logs every change in the Activity Log.</p>
           {canEdit && <div className="ai-suggestions">{SUGGESTIONS.map((s) => <button key={s} className="ai-chip" onClick={() => sendMsg(s)}>{s}</button>)}</div>}</div>}

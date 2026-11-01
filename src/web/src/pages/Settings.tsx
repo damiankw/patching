@@ -11,7 +11,7 @@ export function Settings() {
   usePageHeader({ title: 'Settings', crumbs: [{ label: 'Settings' }] });
   const [code, setCode] = useState(user?.account_code ?? ''); const [name, setName] = useState(user?.account_name ?? '');
   const [cur, setCur] = useState(''); const [next, setNext] = useState(''); const [theme, setTheme] = useState(getTheme());
-  const ai = useQuery({ queryKey: ['ai-status'], queryFn: () => api.get<{ enabled: boolean; model: string }>('/ai/status') });
+  const ai = useQuery({ queryKey: ['ai-status'], queryFn: () => api.get<{ enabled: boolean; model: string; provider: string }>('/ai/status') });
   return <div style={{ display: 'grid', gap: 14, maxWidth: 760 }}>
     <div className="card"><div className="card-head"><h2>Account</h2></div>
       <Form submitLabel="Save changes" disabled={user?.role !== 'admin'} onSubmit={async () => { await api.patch('/settings', { account_code: code, account_name: name }); await refresh(); qc.invalidateQueries(); toast('Saved'); }}>
@@ -19,10 +19,11 @@ export function Settings() {
     <div className="card"><div className="card-head"><h2>Appearance</h2></div>
       <div className="seg"><button className={theme === 'light' ? 'active' : ''} onClick={() => { applyTheme('light'); setTheme('light'); }}>Light</button><button className={theme === 'dark' ? 'active' : ''} onClick={() => { applyTheme('dark'); setTheme('dark'); }}>Dark</button></div>
       <p className="muted small" style={{ marginTop: 8 }}>Keyboard: <kbd>Ctrl K</kbd> search · <kbd>Ctrl B</kbd> toggle menu · in editors <kbd>Ctrl H</kbd> toggle panels, <kbd>Esc</kbd> cancel drawing, <kbd>Backspace</kbd> delete selected connection.</p></div>
-    <div className="card"><div className="card-head"><h2>AI Assistant</h2>{ai.data && <span className={`badge ${ai.data.enabled ? 'badge-green' : 'badge-amber'}`}>{ai.data.enabled ? `Enabled · ${ai.data.model}` : 'Not configured'}</span>}</div>
-      <p className="muted small">The assistant calls the Claude API from the server with your organisation's key. Set these environment variables where Rackdocs runs, then restart:</p>
-      <pre className="code" style={{ background: 'var(--surface-2)', padding: 10, borderRadius: 6, margin: 0 }}>{`ANTHROPIC_API_KEY=sk-ant-…      # required\nRACKDOCS_AI_MODEL=claude-opus-5-5   # optional, default shown\nRACKDOCS_AI_EFFORT=medium            # optional: low, medium, high`}</pre>
-      <p className="muted small" style={{ marginTop: 8 }}>Uploaded documents are sent to the API for the duration of the conversation. Every change the assistant makes runs through the same validation as manual edits and is recorded in the Activity Log under the user's name.</p></div>
+    <div className="card"><div className="card-head"><h2>AI Assistant</h2>{ai.data && <span className={`badge ${ai.data.enabled ? 'badge-green' : 'badge-amber'}`}>{ai.data.enabled ? `Enabled · ${ai.data.provider} · ${ai.data.model}` : `Not configured (${ai.data.provider})`}</span>}</div>
+      <p className="muted small">The assistant calls a model API from the server with your key. Set these environment variables where Rackdocs runs, then restart:</p>
+      <pre className="code" style={{ background: 'var(--surface-2)', padding: 10, borderRadius: 6, margin: 0 }}>{`# OpenRouter (default when its key is present)\nOPENROUTER_API_KEY=sk-or-…\nRACKDOCS_AI_MODEL=openai/gpt-4o        # any openrouter.ai model id that supports tool calling\n\n# or the Anthropic API directly\nANTHROPIC_API_KEY=sk-ant-…\nRACKDOCS_AI_PROVIDER=anthropic\nRACKDOCS_AI_MODEL=claude-opus-5-5`}</pre>
+      <p className="muted small" style={{ marginTop: 8 }}>Uploaded documents are sent to the model provider for the duration of the conversation. Every change the assistant makes runs through the same validation as manual edits and is recorded in the Activity Log under the user's name.</p>
+      <p className="muted small">Prefer your own Claude Code or Claude Desktop? Run the bundled MCP server (<code>npm run mcp</code>) and point the client at it; it exposes the same tools. See the README.</p></div>
     <div className="card"><div className="card-head"><h2>Change password</h2></div>
       <Form submitLabel="Change password" onSubmit={async () => { await api.patch('/auth/password', { current: cur, next }); setCur(''); setNext(''); toast('Password changed'); }}>
         <div className="form-row"><Field label="Current password"><input type="password" value={cur} onChange={(e) => setCur(e.target.value)} required /></Field><Field label="New password" hint="At least 8 characters"><input type="password" value={next} onChange={(e) => setNext(e.target.value)} required minLength={8} /></Field></div></Form></div>

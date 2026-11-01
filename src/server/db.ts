@@ -268,6 +268,7 @@ CREATE TABLE IF NOT EXISTS ai_conversations (
   title TEXT NOT NULL DEFAULT 'New conversation',
   messages TEXT NOT NULL DEFAULT '[]',
   transcript TEXT NOT NULL DEFAULT '[]',
+  provider TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -284,6 +285,7 @@ addColumnIfMissing('templates', 'width_pct', 'INTEGER NOT NULL DEFAULT 100');
 addColumnIfMissing('devices', 'width_pct', 'INTEGER NOT NULL DEFAULT 100');
 addColumnIfMissing('devices', 'slot_x', 'INTEGER NOT NULL DEFAULT 0');
 addColumnIfMissing('device_types', 'is_tray', 'INTEGER NOT NULL DEFAULT 0');
+addColumnIfMissing('ai_conversations', 'provider', "TEXT NOT NULL DEFAULT ''");
 
 export function getMeta(key: string, fallback = ''): string {
   const r = db.prepare('SELECT value FROM schema_meta WHERE key = ?').get<{ value: string }>(key);

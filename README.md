@@ -15,19 +15,40 @@ Self-hosted network and rack documentation for internal use, modelled on the wor
 
 ## AI Assistant
 
-The **AI Assistant** page lets you build and change the documentation in plain language, including from uploaded material: PDFs, photos of racks, CSV exports of spreadsheets, text notes. It runs on the Claude API from the server with your organisation's key, and works through the app's own API as the signed-in user: every change goes through the same validation as a manual edit and is recorded in the Activity Log under that user's name. It never deletes anything unless you explicitly ask.
+The **AI Assistant** page lets you build and change the documentation in plain language, including from uploaded material: PDFs, photos of racks, CSV exports of spreadsheets, text notes. It works through the app's own API as the signed-in user: every change goes through the same validation as a manual edit and is recorded in the Activity Log under that user's name. It never deletes anything unless you explicitly ask.
 
-Set these where Rackdocs runs and restart:
+It talks to a model through **OpenRouter** by default, so you can pick any model there that supports tool calling. Set these where Rackdocs runs and restart:
 
 ```bash
-ANTHROPIC_API_KEY=sk-ant-...          # required
-RACKDOCS_AI_MODEL=claude-opus-5-5      # optional, default shown
-RACKDOCS_AI_EFFORT=medium              # optional: low, medium, high
+OPENROUTER_API_KEY=sk-or-...
+RACKDOCS_AI_MODEL=openai/gpt-4o        # any model id from openrouter.ai/models with tool support
 ```
 
-With Docker, put them in a `.env` file next to `docker-compose.yml` and add `env_file: .env` to the service, or pass them with `environment:`.
+The Anthropic API is also supported: set `ANTHROPIC_API_KEY`, `RACKDOCS_AI_PROVIDER=anthropic` and optionally `RACKDOCS_AI_MODEL=claude-opus-5-5`. With Docker, put the variables in a `.env` file next to `docker-compose.yml`.
 
-What it can do: create locations, floors, rooms, racks and floor devices; mount rack devices from templates or create new templates; add building and user connections (it knows the keystone rule); create VLANs and WLANs and assign them to ports; rename, move and annotate devices; answer questions about what is connected where. Office files are not read directly: export Word and Excel documents to PDF or CSV first.
+What it can do: create locations, floors, rooms, racks and floor devices; mount rack devices from templates or create new templates; add building and user connections (it knows the keystone rule); create VLANs and WLANs and assign them to ports; rename, move and annotate devices; answer questions about what is connected where. PDFs are read as text on the server (scanned PDFs without a text layer will not work through OpenRouter); images go to the model directly. Office files are not read: export Word and Excel documents to PDF or CSV first.
+
+### Use it from Claude Code or Claude Desktop instead (MCP)
+
+The same tools are available as an MCP server, so you can drive Rackdocs from your own Claude Code session or Claude Desktop without any key in the app. It signs in to a running Rackdocs server as a user:
+
+```bash
+RACKDOCS_URL=http://localhost:3000 RACKDOCS_EMAIL=you@example.com RACKDOCS_PASSWORD=secret npm run mcp
+```
+
+Claude Code, from the repo folder:
+
+```bash
+claude mcp add rackdocs -e RACKDOCS_URL=http://localhost:3000 -e RACKDOCS_EMAIL=you@example.com -e RACKDOCS_PASSWORD=secret -- node dist/server/mcp.js
+```
+
+Claude Desktop, in its MCP configuration:
+
+```json
+{ "mcpServers": { "rackdocs": { "command": "node", "args": ["/path/to/patching/dist/server/mcp.js"], "env": { "RACKDOCS_URL": "http://localhost:3000", "RACKDOCS_EMAIL": "you@example.com", "RACKDOCS_PASSWORD": "secret" } } } }
+```
+
+Then ask Claude things like "read my cabling spreadsheet at ~/Desktop/cabling.xlsx and create the outlets and building connections in Rackdocs"; Claude Code reads the file itself and calls the Rackdocs tools.
 
 ## Run with Docker
 
@@ -65,9 +86,11 @@ For development with hot reload (`npm run dev`), the web app is on port 5173 and
 | `PORT` | `3000` | HTTP port |
 | `DATA_DIR` | `./data` (or `/data` in Docker) | Folder holding `rackdocs.db` and `uploads/` |
 | `COOKIE_SECURE` | unset | Set to `1` when served over HTTPS so the session cookie is marked Secure |
-| `ANTHROPIC_API_KEY` | unset | Enables the AI Assistant |
-| `RACKDOCS_AI_MODEL` | `claude-opus-5-5` | Claude model used by the assistant |
-| `RACKDOCS_AI_EFFORT` | `medium` | Reasoning effort: `low`, `medium`, `high` |
+| `OPENROUTER_API_KEY` | unset | Enables the AI Assistant through OpenRouter |
+| `RACKDOCS_AI_MODEL` | `openai/gpt-4o` (OpenRouter) or `claude-opus-5-5` (Anthropic) | Model used by the assistant |
+| `RACKDOCS_AI_PROVIDER` | auto | `openrouter` or `anthropic` |
+| `ANTHROPIC_API_KEY` | unset | Enables the assistant through the Anthropic API |
+| `RACKDOCS_AI_EFFORT` | `medium` | Anthropic only: `low`, `medium`, `high` |
 
 ## Quickstart
 
