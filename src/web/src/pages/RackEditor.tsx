@@ -12,7 +12,7 @@ import { ShortcutsHelp } from './LocationView';
 import { panelLayout } from './DeviceLibrary';
 import { zoomAt, type View } from '../components/canvas';
 
-const UH = 24; const RW = 520; const LEFT = 70; const RAIL = 14; const PAD = 16; const PAD_TOP = 60; const GUT = 80;
+const UH = 22; const RW = 440; const LEFT = 44; const RAIL = 12; const PAD = 22; const PAD_TOP = 36; const GUT = 76; const CAP = 5;
 const INNER = RW - RAIL * 2 - 2; // usable width inside the rails
 const snapSlot = (x: number, width: number) => Math.max(0, Math.min(100 - width, Math.round((x * 12) / 100) * (100 / 12)));
 const panelX = (d: { slot_x: number }) => LEFT + RAIL + 1 + (INNER * d.slot_x) / 100;
@@ -109,31 +109,66 @@ function TemplatePalette({ templates, canEdit }: { templates: Template[]; canEdi
     <div className="palette-list-items">{groups.map(([type, list]) => <div key={type}><div className="palette-group-label">{type}</div>{list.map((t) => <div key={t.id} className="palette-item-dev" draggable={canEdit} onDragStart={(e) => { e.dataTransfer.setData('text/rd-template', String(t.id)); e.dataTransfer.effectAllowed = 'copy'; }} title={`${t.height_u}U · ${t.ports.length} ports`}><span style={{ flex: 1 }}>{t.name}</span><span className="muted tiny">{t.height_u}U</span></div>)}</div>)}</div></div>;
 }
 
+/** Polyline → path with rounded corners (radius r). */
+function roundedPath(pts: [number, number][], r = 4) {
+  if (pts.length < 2) return '';
+  let d = `M ${pts[0][0]} ${pts[0][1]}`;
+  for (let i = 1; i < pts.length - 1; i++) {
+    const [px, py] = pts[i - 1], [cx, cy] = pts[i], [nx, ny] = pts[i + 1];
+    const d1 = Math.hypot(cx - px, cy - py), d2 = Math.hypot(nx - cx, ny - cy); const rr = Math.min(r, d1 / 2, d2 / 2);
+    const ax = cx - ((cx - px) / d1) * rr, ay = cy - ((cy - py) / d1) * rr; const bx = cx + ((nx - cx) / d2) * rr, by = cy + ((ny - cy) / d2) * rr;
+    d += ` L ${ax} ${ay} Q ${cx} ${cy} ${bx} ${by}`;
+  }
+  const [lx, ly] = pts[pts.length - 1]; return `${d} L ${lx} ${ly}`;
+}
+/** Connector glyph by port kind, drawn in an s×s box with its origin at the top-left. */
+function PortGlyph({ kind, s, fill, stroke, dashed }: { kind: string; s: number; fill: string; stroke: string; dashed?: boolean }) {
+  const common = { fill, stroke, strokeWidth: 1, vectorEffect: 'non-scaling-stroke' as const, strokeDasharray: dashed ? '2 1.5' : undefined };
+  if (kind === 'power') return <circle cx={s / 2} cy={s / 2} r={s / 2} {...common} />;
+  if (kind === 'sfp' || kind === 'sfp+' || kind === 'qsfp') return <rect x={0} y={s * 0.15} width={s} height={s * 0.7} rx={1} {...common} />;
+  if (kind === 'lc' || kind === 'sc' || kind === 'e2000' || kind === 'mpo') return <g><rect x={0} y={0} width={s} height={s} rx={1} {...common} /><circle cx={s * 0.32} cy={s / 2} r={s * 0.14} fill={stroke} /><circle cx={s * 0.68} cy={s / 2} r={s * 0.14} fill={stroke} /></g>;
+  // RJ45: square body with the latch tab at the bottom
+  const t = s * 0.28;
+  return <path d={`M 1 0 H ${s - 1} Q ${s} 0 ${s} 1 V ${s - t} H ${s * 0.72} V ${s} H ${s * 0.28} V ${s - t} H 0 V 1 Q 0 0 1 0 Z`} {...common} />;
+}
+
 function RackCanvas({ rack, face, view, setView, fitMode, selDev, selPort, canEdit, hoverChain, setHoverChain, vlanPorts, conns, onSelectDevice, onSelectPort, onEmptyClick, onDropTemplate, onMoveDevice, onConnect, onClearVlan, onKeystoneMissing, onWireToDevice }: {
   rack: RackDetail; face: Face; view: View; setView: (v: View) => void; fitMode: 'height' | 'width'; selDev: number | null; selPort: number | null; canEdit: boolean; hoverChain: Set<number> | null; setHoverChain: (s: Set<number> | null) => void; vlanPorts: Set<number> | null; conns: Connection[];
   onSelectDevice: (id: number | null) => void; onSelectPort: (dev: number, port: number) => void; onEmptyClick: (u: number) => void; onDropTemplate: (tplId: number, u: number) => void; onMoveDevice: (devId: number, u: number, slotX: number) => void; onConnect: (a: number, b: number) => void; onClearVlan: () => void; onKeystoneMissing: (p: Port, dev: RackDevice) => void; onWireToDevice: (fromPort: number, deviceId: number) => void }) {
   const svgRef = useRef<SVGSVGElement>(null);
-  const H = rack.height_u * UH + PAD + PAD_TOP; const W = LEFT + RW + GUT + 20;
+  const H = rack.height_u * UH + PAD + PAD_TOP; const W = LEFT + RW + GUT;
   const [drag, setDrag] = useState<null | { kind: 'pan'; sx: number; sy: number; v: View } | { kind: 'device'; id: number; startX: number; startY: number; dx: number; dy: number } | { kind: 'wire'; from: number; x: number; y: number }>(null);
+  const [dropU, setDropU] = useState<number | null>(null);
+  const [pxPerUnit, setPxPerUnit] = useState(1);
   const yOfTop = (topU: number) => PAD_TOP + (rack.height_u - topU) * UH;
   const scale = () => { const r = svgRef.current!.getBoundingClientRect(); return fitMode === 'height' ? Math.min(r.width / W, r.height / H) : r.width / W; };
+  useEffect(() => { const el = svgRef.current; if (!el) return; const upd = () => setPxPerUnit(scale() * view.k); upd(); const ro = new ResizeObserver(upd); ro.observe(el); return () => ro.disconnect(); }, [view.k, fitMode]); // eslint-disable-line react-hooks/exhaustive-deps
   const toSvg = (e: { clientX: number; clientY: number }) => { const r = svgRef.current!.getBoundingClientRect(); const s = scale(); const ox = fitMode === 'height' ? (r.width - W * s) / 2 : 0; return { x: ((e.clientX - r.left - ox) / s - view.tx) / view.k, y: ((e.clientY - r.top) / s - view.ty) / view.k }; };
+  const unitAt = (y: number) => Math.max(1, Math.min(rack.height_u, Math.ceil((H - PAD - y) / UH)));
   const occupied = useMemo(() => { const m = new Map<number, RackDevice>(); for (const d of rack.devices) { if (d.is_tray || d.width_pct < 100) continue; for (let u = d.position_u ?? 0; u < (d.position_u ?? 0) + d.height_u; u++) m.set(u, d); } return m; }, [rack]);
-  // port geometry (device id -> port id -> {x,y,s})
+  const labelWOf = (pw: number) => (pw < 200 ? 12 : 20);
+  // port geometry (port id -> {x,y,s})
   const geom = useMemo(() => {
     const g = new Map<number, { x: number; y: number; s: number; dev: RackDevice; port: Port }>();
     for (const d of rack.devices) {
       const ports = d.ports.filter((p) => p.face === face && p.kind !== 'wireless'); if (!ports.length) continue;
-      const h = d.height_u * UH; const pw = panelW(d); const labelW = pw < 200 ? 18 : 30; const { rows, cols, cell } = panelLayout(ports, d.height_u, pw + 50 - labelW - 6); const top = yOfTop((d.position_u ?? 1) + d.height_u - 1);
-      ports.forEach((p, i) => { const r = Math.floor(i / cols), c = i % cols; const s = Math.min(cell - 3, (h - 8) / rows - 6); const x = panelX(d) + labelW + 6 + c * cell; const y = top + 4 + r * (h - 8) / rows + 2; g.set(p.id, { x, y, s, dev: d, port: p }); });
+      const h = d.height_u * UH; const pw = panelW(d); const labelW = labelWOf(pw); const avail = pw - labelW - 12;
+      const maxRows = Math.max(1, Math.min(d.height_u * 2, 4)); let rows = 1; while (Math.ceil(ports.length / rows) * 11 > avail && rows < maxRows) rows++;
+      const cols = Math.ceil(ports.length / rows); const cell = Math.min(18, avail / cols); const rowH = (h - 6) / rows; const s = Math.max(4, Math.min(cell - 3, rowH - 5)); const top = yOfTop((d.position_u ?? 1) + d.height_u - 1);
+      const x0 = panelX(d) + labelW + 6 + (avail - cols * cell) / 2 + (cell - s) / 2;
+      ports.forEach((p, i) => { const r = Math.floor(i / cols), c = i % cols; g.set(p.id, { x: x0 + c * cell, y: top + 3 + r * rowH + (rowH - s) / 2 + 1, s, dev: d, port: p }); });
     }
     return g;
   }, [rack, face]); // eslint-disable-line react-hooks/exhaustive-deps
-  const rightX = LEFT + RW + 6;
-  const wires = conns.filter((c) => c.type === 'user' && geom.has(c.port_a_id) && geom.has(c.port_b_id)).map((c, i) => ({ c, a: geom.get(c.port_a_id)!, b: geom.get(c.port_b_id)!, lane: 8 + (i % 10) * 7 }));
+  const rightX = LEFT + RW + 8;
+  const wires = useMemo(() => {
+    const list = conns.filter((c) => c.type === 'user' && geom.has(c.port_a_id) && geom.has(c.port_b_id)).map((c) => ({ c, a: geom.get(c.port_a_id)!, b: geom.get(c.port_b_id)! }));
+    // shorter spans take inner lanes so cables cross as little as possible
+    return list.sort((p, q) => Math.abs(p.a.y - p.b.y) - Math.abs(q.a.y - q.b.y)).map((w, i) => ({ ...w, lane: 6 + (i % 11) * 6 }));
+  }, [conns, geom]);
   const outbound = conns.filter((c) => c.type === 'user' && (geom.has(c.port_a_id) !== geom.has(c.port_b_id))).map((c) => ({ c, g: geom.get(geom.has(c.port_a_id) ? c.port_a_id : c.port_b_id)! }));
   const chainOf = (p: Port) => new Set(p.chain?.steps.map((s) => s.port_id) ?? [p.id]);
-  const portFill = (p: Port, dev: RackDevice) => { if (dev.passive) return p.keystone ? (p.state === 'complete' ? 'var(--port-complete)' : p.state === 'incomplete' ? 'var(--port-incomplete)' : 'var(--port-keystone)') : 'none'; return p.state === 'complete' ? 'var(--port-complete)' : p.state === 'incomplete' ? 'var(--port-incomplete)' : 'none'; };
+  const portFill = (p: Port, dev: RackDevice) => { if (dev.passive && !p.keystone) return 'var(--surface)'; if (p.state === 'complete') return 'var(--port-complete)'; if (p.state === 'incomplete') return 'var(--port-incomplete)'; return dev.passive ? 'var(--port-keystone)' : 'var(--surface)'; };
   const onDown = (e: RPointerEvent<SVGSVGElement>) => { if (e.button !== 0) return; setDrag({ kind: 'pan', sx: e.clientX, sy: e.clientY, v: view }); };
   const onMove = (e: RPointerEvent<SVGSVGElement>) => { if (!drag) return; if (drag.kind === 'pan') { const s = scale(); setView({ ...drag.v, tx: drag.v.tx + (e.clientX - drag.sx) / s, ty: drag.v.ty + (e.clientY - drag.sy) / s }); } else if (drag.kind === 'device') setDrag({ ...drag, dx: (e.clientX - drag.startX) / (scale() * view.k), dy: (e.clientY - drag.startY) / (scale() * view.k) }); else if (drag.kind === 'wire') { const p = toSvg(e); setDrag({ ...drag, x: p.x, y: p.y }); } };
   const onUp = (e: RPointerEvent<SVGSVGElement>) => {
@@ -145,54 +180,74 @@ function RackCanvas({ rack, face, view, setView, fitMode, selDev, selPort, canEd
   };
   const dragY = (d: RackDevice) => drag?.kind === 'device' && drag.id === d.id ? drag.dy : 0;
   const dragX = (d: RackDevice) => drag?.kind === 'device' && drag.id === d.id ? drag.dx : 0;
-  const unitCenters = Array.from({ length: rack.height_u }, (_, i) => rack.height_u - i);
-  return <svg ref={svgRef} className="editor-canvas" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio={fitMode === 'height' ? 'xMidYMin meet' : 'xMinYMin meet'} style={{ cursor: drag?.kind === 'pan' ? 'grabbing' : 'default' }}
+  const units = Array.from({ length: rack.height_u }, (_, i) => rack.height_u - i);
+  const showPortNames = pxPerUnit >= 1.9; const showUnitNumbers = pxPerUnit >= 0.55;
+  const ns = { vectorEffect: 'non-scaling-stroke' as const };
+  const railX = [LEFT, LEFT + RW - RAIL];
+  return <svg ref={svgRef} className="editor-canvas rack-svg" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio={fitMode === 'height' ? 'xMidYMin meet' : 'xMinYMin meet'} style={{ cursor: drag?.kind === 'pan' ? 'grabbing' : 'default' }}
     onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp} onPointerCancel={() => setDrag(null)}
     onWheel={(e) => { const p = toSvg(e); setView(zoomAt(view, e.deltaY < 0 ? 1.15 : 1 / 1.15, p.x * view.k + view.tx, p.y * view.k + view.ty)); }}
-    onDragOver={(e) => { if (canEdit && e.dataTransfer.types.includes('text/rd-template')) e.preventDefault(); }} onDrop={(e) => { const t = Number(e.dataTransfer.getData('text/rd-template')); if (!t) return; e.preventDefault(); const p = toSvg(e); const u = Math.max(1, Math.min(rack.height_u, Math.ceil((H - PAD - p.y) / UH))); onDropTemplate(t, u); }}>
+    onDragOver={(e) => { if (canEdit && e.dataTransfer.types.includes('text/rd-template')) { e.preventDefault(); setDropU(unitAt(toSvg(e).y)); } }} onDragLeave={() => setDropU(null)}
+    onDrop={(e) => { setDropU(null); const t = Number(e.dataTransfer.getData('text/rd-template')); if (!t) return; e.preventDefault(); onDropTemplate(t, unitAt(toSvg(e).y)); }}>
     <g transform={`translate(${view.tx} ${view.ty}) scale(${view.k})`} id="rack-export-root">
-      <rect x={LEFT - 4} y={PAD_TOP - 10} width={RW + 8} height={rack.height_u * UH + 20} rx={4} fill="var(--surface-2)" stroke="var(--border-strong)" />
-      <rect x={LEFT} y={PAD_TOP} width={RAIL} height={rack.height_u * UH} fill="var(--rack-rail)" /><rect x={LEFT + RW - RAIL} y={PAD_TOP} width={RAIL} height={rack.height_u * UH} fill="var(--rack-rail)" />
-      {unitCenters.map((u) => { const y = yOfTop(u); const occ = occupied.get(u);
-        // largest free horizontal gap in this unit (ignoring trays), for the "+" marker
+      {/* frame: interior, caps, rails with mounting holes, base */}
+      <rect x={LEFT + RAIL} y={PAD_TOP} width={RW - RAIL * 2} height={rack.height_u * UH} fill="var(--rack-interior)" />
+      <rect x={LEFT - 3} y={PAD_TOP - CAP} width={RW + 6} height={CAP} fill="var(--rack-rail)" stroke="var(--border-strong)" {...ns} />
+      <rect x={LEFT - 3} y={PAD_TOP + rack.height_u * UH} width={RW + 6} height={CAP} fill="var(--rack-rail)" stroke="var(--border-strong)" {...ns} />
+      <rect x={LEFT + 20} y={PAD_TOP + rack.height_u * UH + CAP} width={RW - 40} height={10} fill="var(--rack-base)" />
+      {Array.from({ length: 14 }, (_, i) => <rect key={i} x={LEFT + 60 + i * ((RW - 120) / 14) + 3} y={PAD_TOP + rack.height_u * UH + CAP + 3} width={(RW - 120) / 14 - 6} height={4} fill="var(--surface)" opacity={0.5} />)}
+      {railX.map((x) => <rect key={x} x={x} y={PAD_TOP} width={RAIL} height={rack.height_u * UH} fill="var(--rack-rail)" stroke="var(--border-strong)" {...ns} />)}
+      {units.map((u) => { const y = yOfTop(u); const occ = occupied.get(u);
         const spans = rack.devices.filter((d) => !d.is_tray && (d.position_u ?? 0) <= u && u <= (d.position_u ?? 0) + d.height_u - 1).map((d) => [d.slot_x, d.slot_x + d.width_pct] as [number, number]).sort((a, b) => a[0] - b[0]);
         let gap: [number, number] = [0, 0]; let cur = 0; for (const [a, b] of spans) { if (a - cur > gap[1] - gap[0]) gap = [cur, a]; cur = Math.max(cur, b); } if (100 - cur > gap[1] - gap[0]) gap = [cur, 100];
         const gapW = gap[1] - gap[0]; const plusX = LEFT + RAIL + 1 + (INNER * (gap[0] + gap[1])) / 200;
-        return <g key={u}>
-        <text x={LEFT - 10} y={y + UH / 2 + 3.5} fontSize={9} textAnchor="end" fill="var(--muted)" fontFamily="var(--mono)">{u}</text>
-        <circle cx={LEFT + RAIL / 2} cy={y + UH / 2} r={2} fill="var(--border-strong)" /><circle cx={LEFT + RW - RAIL / 2} cy={y + UH / 2} r={2} fill="var(--border-strong)" />
-        {!occ && <g style={{ cursor: canEdit ? 'pointer' : 'default' }} onPointerDown={(e) => e.stopPropagation()} onClick={() => onEmptyClick(u)}><rect x={LEFT + RAIL} y={y} width={RW - RAIL * 2} height={UH} fill="transparent" /><line x1={LEFT + RAIL} x2={LEFT + RW - RAIL} y1={y + UH} y2={y + UH} stroke="var(--border)" strokeWidth={0.5} />{canEdit && gapW >= 8 && <g opacity={0.5}><circle cx={plusX} cy={y + UH / 2} r={6} fill="none" stroke="var(--primary)" strokeWidth={1} /><text x={plusX} y={y + UH / 2 + 3.5} fontSize={10} textAnchor="middle" fill="var(--primary)">+</text></g>}<title>{canEdit ? `Add device at U${u}` : `U${u} empty`}</title></g>}
-      </g>; })}
-      {[...rack.devices].sort((a, b) => (b.is_tray - a.is_tray)).map((d) => { const top = yOfTop((d.position_u ?? 1) + d.height_u - 1) + dragY(d); const h = d.height_u * UH; const active = selDev === d.id; const tpl = d.template_name ?? d.type_name; const px = panelX(d) + dragX(d); const pw = panelW(d); const labelW = pw < 200 ? 18 : 30;
-        return <g key={d.id} data-device={d.id} transform={`translate(0 ${top})`} style={{ cursor: canEdit ? 'grab' : 'pointer' }} onPointerDown={(e) => { e.stopPropagation(); if (!canEdit) { onSelectDevice(d.id); return; } setDrag({ kind: 'device', id: d.id, startX: e.clientX, startY: e.clientY, dx: 0, dy: 0 }); (e.currentTarget as Element).setPointerCapture?.(e.pointerId); }} onPointerUp={(e) => { if (drag?.kind === 'device') { e.stopPropagation(); onUp(e as unknown as RPointerEvent<SVGSVGElement>); } else if (!canEdit) onSelectDevice(d.id); }}>
+        return <g key={u} className="rack-unit">
+          {showUnitNumbers && <text x={LEFT - 5} y={y + UH / 2 + 2.5} fontSize={7} textAnchor="end" fill="var(--muted)" fontFamily="var(--mono)" style={{ pointerEvents: 'none' }}>{u}</text>}
+          {railX.map((x) => [0.22, 0.5, 0.78].map((f) => <rect key={`${x}-${f}`} x={x + RAIL / 2 - 1.5} y={y + UH * f - 1.5} width={3} height={3} rx={0.6} fill="var(--rack-hole)" />))}
+          <line x1={LEFT + RAIL} x2={LEFT + RW - RAIL} y1={y + UH} y2={y + UH} stroke="var(--border)" strokeWidth={1} opacity={0.7} {...ns} />
+          {!occ && <g style={{ cursor: canEdit ? 'pointer' : 'default' }} onPointerDown={(e) => e.stopPropagation()} onClick={() => onEmptyClick(u)}>
+            <rect className="unit-bg" x={LEFT + RAIL} y={y} width={RW - RAIL * 2} height={UH} fill={dropU === u ? 'var(--accent)' : 'transparent'} />
+            {dropU === u && <rect x={LEFT + RAIL + 1} y={y + 1} width={RW - RAIL * 2 - 2} height={UH - 2} rx={2} fill="none" stroke="var(--primary)" strokeWidth={1.5} strokeDasharray="4 3" {...ns} />}
+            {canEdit && gapW >= 8 && <g className="plus" style={{ pointerEvents: 'none' }}><circle cx={plusX} cy={y + UH / 2} r={5} fill="var(--surface)" stroke="var(--primary)" strokeWidth={1} {...ns} /><path d={`M ${plusX - 2.5} ${y + UH / 2} H ${plusX + 2.5} M ${plusX} ${y + UH / 2 - 2.5} V ${y + UH / 2 + 2.5}`} stroke="var(--primary)" strokeWidth={1.2} {...ns} /></g>}
+            <title>{canEdit ? `Add device at U${u}` : `U${u} empty`}</title></g>}
+        </g>; })}
+      {[...rack.devices].sort((a, b) => (b.is_tray - a.is_tray)).map((d) => { const top = yOfTop((d.position_u ?? 1) + d.height_u - 1) + dragY(d); const h = d.height_u * UH; const active = selDev === d.id; const tpl = d.template_name ?? d.type_name; const px = panelX(d) + dragX(d); const pw = panelW(d); const labelW = labelWOf(pw); const dragging = drag?.kind === 'device' && drag.id === d.id;
+        const tplColor = rack.devices && (d as unknown as { color?: string }).color; void tplColor;
+        return <g key={d.id} data-device={d.id} className="rack-dev" transform={`translate(0 ${top})`} style={{ cursor: canEdit ? 'grab' : 'pointer' }} opacity={dragging ? 0.8 : 1} onPointerDown={(e) => { e.stopPropagation(); if (!canEdit) { onSelectDevice(d.id); return; } setDrag({ kind: 'device', id: d.id, startX: e.clientX, startY: e.clientY, dx: 0, dy: 0 }); (e.currentTarget as Element).setPointerCapture?.(e.pointerId); }} onPointerUp={(e) => { if (drag?.kind === 'device') { e.stopPropagation(); onUp(e as unknown as RPointerEvent<SVGSVGElement>); } else if (!canEdit) onSelectDevice(d.id); }}>
           {d.is_tray ? <>
-            <rect x={px} y={1} width={pw} height={h - 2} rx={2} fill="var(--surface-3)" stroke={active ? 'var(--primary)' : 'var(--border-strong)'} strokeWidth={active ? 2 : 1} strokeDasharray={active ? undefined : '4 3'} opacity={drag?.kind === 'device' && drag.id === d.id ? 0.75 : 1} />
-            <rect x={px} y={h - 5} width={pw} height={4} fill="var(--border-strong)" />
-            <text x={px + 6} y={h - 8} fontSize={7} fill="var(--muted)" fontFamily="var(--mono)" fontWeight={700}>{d.code} · tray</text>
+            <rect className="body" x={px} y={1} width={pw} height={h - 2} rx={1.5} fill="var(--rack-tray)" stroke={active ? 'var(--primary)' : 'var(--border-strong)'} strokeWidth={active ? 1.5 : 1} strokeDasharray={active ? undefined : '3 2'} {...ns} />
+            <rect x={px} y={h - 4} width={pw} height={3} fill="var(--border-strong)" />
+            <text x={px + 5} y={h - 7} fontSize={6} fill="var(--muted)" fontFamily="var(--mono)" fontWeight={700} style={{ pointerEvents: 'none' }}>{d.code} · tray</text>
           </> : <>
-            <rect x={px} y={1} width={pw} height={h - 2} rx={2} fill="var(--surface)" stroke={active ? 'var(--primary)' : 'var(--border-strong)'} strokeWidth={active ? 2 : 1} opacity={drag?.kind === 'device' && drag.id === d.id ? 0.75 : 1} />
-            <rect x={px} y={1} width={labelW} height={h - 2} fill="var(--surface-2)" />
-            <text transform={`translate(${px + labelW / 2 + 1} ${h / 2}) rotate(-90)`} fontSize={labelW < 30 ? 6.5 : h > 30 ? 9 : 7.5} fontWeight={700} textAnchor="middle" fill="var(--text)" fontFamily="var(--mono)">{d.code}</text>
-            {d.ports.filter((p) => p.face === face && p.kind !== 'wireless').length === 0 && <text x={px + labelW + (pw - labelW) / 2} y={h / 2 + 3.5} fontSize={pw < 200 ? 7 : 9} textAnchor="middle" fill="var(--muted)">{(tpl + (d.name ? ` · ${d.name}` : '')).slice(0, pw < 200 ? 22 : 60)}</text>}
+            {active && <rect x={px - 1.5} y={-0.5} width={pw + 3} height={h + 1} rx={2.5} fill="none" stroke="var(--primary)" strokeWidth={1.5} opacity={0.9} {...ns} />}
+            <rect className="body" x={px} y={1} width={pw} height={h - 2} rx={1.5} fill="var(--rack-panel)" stroke="var(--border-strong)" strokeWidth={1} {...ns} />
+            <rect x={px} y={1} width={labelW} height={h - 2} fill="var(--rack-label)" />
+            <line x1={px + labelW} x2={px + labelW} y1={1} y2={h - 1} stroke="var(--border)" strokeWidth={1} {...ns} />
+            <text transform={`translate(${px + labelW / 2 + 0.5} ${h / 2}) rotate(-90)`} fontSize={labelW < 20 ? 5.5 : h > 30 ? 7.5 : 6.5} fontWeight={700} textAnchor="middle" fill="var(--text)" fontFamily="var(--mono)" style={{ pointerEvents: 'none' }}>{d.code}</text>
+            {d.ports.filter((p) => p.face === face && p.kind !== 'wireless').length === 0 && <text x={px + labelW + (pw - labelW) / 2} y={h / 2 + 2.5} fontSize={pw < 200 ? 6 : 7} textAnchor="middle" fill="var(--muted)" style={{ pointerEvents: 'none' }}>{(tpl + (d.name ? ` · ${d.name}` : '')).slice(0, pw < 200 ? 22 : 64)}</text>}
           </>}
           <title>{d.path} · {tpl}{d.name ? ` · ${d.name}` : ''}{d.width_pct < 100 ? ` · ${d.width_pct}% width` : ''}</title>
         </g>; })}
-      {[...geom.values()].map(({ x, y, s, dev, port }) => { const top = dragY(dev); const chainHi = hoverChain?.has(port.id); const vlanHi = vlanPorts?.has(port.id); const sel = selPort === port.id; const fill = portFill(port, dev);
-        const stroke = chainHi ? '#eab308' : sel ? 'var(--primary)' : vlanHi ? 'var(--amber)' : dev.passive && !port.keystone ? 'var(--port-none)' : fill === 'none' ? 'var(--port-none)' : fill;
+      {wires.map(({ c, a, b, lane }) => { const hi = hoverChain?.has(c.port_a_id); const col = hi ? '#eab308' : (c.chain?.color || 'var(--user)'); const ax = a.x + a.s / 2 + dragX(a.dev), ay = a.y + a.s / 2 + dragY(a.dev), bx = b.x + b.s / 2 + dragX(b.dev), by = b.y + b.s / 2 + dragY(b.dev); const lx = rightX + lane; const ca = ay - a.s / 2 - 2.5, cb = by - b.s / 2 - 2.5;
+        return <path key={c.id} d={roundedPath([[ax, ay], [ax, ca], [lx, ca], [lx, cb], [bx, cb], [bx, by]], 4)} fill="none" stroke={col} strokeWidth={hi ? 1.8 : 1.2} strokeLinecap="round" opacity={hoverChain && !hi ? 0.2 : 0.95} style={{ pointerEvents: 'none' }} {...ns} />; })}
+      {[...geom.values()].map(({ x, y, s, dev, port }) => { const top = dragY(dev); const chainHi = hoverChain?.has(port.id); const vlanHi = vlanPorts?.has(port.id); const sel = selPort === port.id; const fill = portFill(port, dev); const empty = fill === 'var(--surface)';
+        const stroke = chainHi ? '#eab308' : sel ? 'var(--primary)' : vlanHi ? 'var(--amber)' : empty ? 'var(--port-none)' : fill;
         return <g key={port.id} transform={`translate(${x + dragX(dev)} ${y + top})`} data-port={port.id} style={{ cursor: canEdit ? 'crosshair' : 'pointer' }}
           onPointerEnter={() => port.state !== 'none' && setHoverChain(chainOf(port))} onPointerLeave={() => setHoverChain(null)}
           onPointerDown={(e) => { e.stopPropagation(); if (canEdit && !port.user && (!dev.passive || port.keystone)) { const p = toSvg(e); setDrag({ kind: 'wire', from: port.id, x: p.x, y: p.y }); (e.target as Element).setPointerCapture?.(e.pointerId); } else if (canEdit && dev.passive && !port.keystone) onKeystoneMissing(port, dev); }}
           onPointerUp={(e) => { e.stopPropagation(); if (drag?.kind === 'wire') { onUp(e as unknown as RPointerEvent<SVGSVGElement>); if (Math.abs(drag.x) < 1) onSelectPort(dev.id, port.id); } else onSelectPort(dev.id, port.id); if (drag?.kind === 'wire' && drag.from === port.id) onSelectPort(dev.id, port.id); }}>
-          <rect x={0} y={0} width={s} height={s} rx={1.5} fill={fill === 'none' ? 'var(--surface)' : fill} stroke={stroke} strokeWidth={chainHi || sel || vlanHi ? 2 : 1.2} strokeDasharray={dev.passive && !port.keystone ? '2 1.5' : undefined} />
-          {chainHi && <rect x={-1.5} y={-1.5} width={s + 3} height={s + 3} rx={2} fill="none" stroke="#eab308" strokeWidth={1} opacity={0.6} />}
-          {vlanHi && port.vlan_id && <circle cx={s} cy={0} r={2} fill="var(--amber)" />}
-          <text x={s / 2} y={s + 6} fontSize={4.2} textAnchor="middle" fill="var(--muted)" style={{ pointerEvents: 'none' }}>{port.name.length > 5 ? port.name.slice(0, 4) + '…' : port.name}</text>
+          <rect x={-2} y={-2} width={s + 4} height={s + 4} fill="transparent" />
+          <g className="glyph">
+            {(sel || chainHi || vlanHi) && <rect x={-1.5} y={-1.5} width={s + 3} height={s + 3} rx={1.5} fill="none" stroke={stroke} strokeWidth={1} opacity={0.7} {...ns} />}
+            <PortGlyph kind={port.kind} s={s} fill={fill} stroke={stroke} dashed={dev.passive === 1 && !port.keystone} />
+            {vlanHi && port.vlan_id && <circle cx={s} cy={0} r={1.6} fill="var(--amber)" />}
+          </g>
+          {showPortNames && <text x={s / 2} y={-1.2} fontSize={3.4} textAnchor="middle" fill="var(--muted)" fontFamily="var(--mono)" style={{ pointerEvents: 'none' }}>{port.name.length > 5 ? port.name.slice(0, 4) + '…' : port.name}</text>}
           <title>{port.path} · {port.kind}{port.vlan_vid != null ? ` · VLAN ${port.vlan_vid}` : ''} · {dev.passive && !port.keystone ? 'no building connection (no keystone)' : port.state === 'none' ? 'unconnected' : port.state}</title>
         </g>; })}
-      {wires.map(({ c, a, b, lane }) => { const hi = hoverChain?.has(c.port_a_id); const col = hi ? '#eab308' : (c.chain?.color || 'var(--user)'); const ax = a.x + a.s / 2 + dragX(a.dev), ay = a.y + a.s / 2 + dragY(a.dev), bx = b.x + b.s / 2 + dragX(b.dev), by = b.y + b.s / 2 + dragY(b.dev); const lx = rightX + lane;
-        return <path key={c.id} d={`M ${ax} ${ay} L ${ax} ${ay - a.s} L ${lx} ${ay - a.s} L ${lx} ${by - b.s} L ${bx} ${by - b.s} L ${bx} ${by}`} fill="none" stroke={col} strokeWidth={hi ? 2 : 1.2} opacity={hoverChain && !hi ? 0.25 : 0.9} style={{ pointerEvents: 'none' }} />; })}
-      {outbound.map(({ c, g }) => { const hi = hoverChain?.has(g.port.id); return <g key={c.id} transform={`translate(${g.x + g.s / 2 + dragX(g.dev)} ${g.y - 2 + dragY(g.dev)})`} style={{ pointerEvents: 'none' }}><line x1={0} y1={0} x2={0} y2={-6} stroke={hi ? '#eab308' : (c.chain?.color || 'var(--user)')} strokeWidth={1.2} /><rect x={-14} y={-14} width={28} height={8} rx={2} fill="var(--text)" /><text x={0} y={-8} fontSize={5} textAnchor="middle" fill="var(--bg)" fontWeight={700}>⇗ OUTBOUND</text></g>; })}
-      {drag?.kind === 'wire' && geom.get(drag.from) && <line x1={geom.get(drag.from)!.x + geom.get(drag.from)!.s / 2} y1={geom.get(drag.from)!.y + geom.get(drag.from)!.s / 2} x2={drag.x} y2={drag.y} stroke="var(--primary)" strokeWidth={1.5} strokeDasharray="4 3" style={{ pointerEvents: 'none' }} />}
+      {outbound.map(({ c, g }) => { const hi = hoverChain?.has(g.port.id); const col = hi ? '#eab308' : (c.chain?.color || 'var(--user)'); const x = g.x + g.s / 2 + dragX(g.dev), y = g.y + dragY(g.dev);
+        return <g key={c.id} transform={`translate(${x} ${y})`} style={{ pointerEvents: 'none' }}><path d={roundedPath([[0, g.s / 2], [0, -4], [10, -4], [10, -9]], 2)} fill="none" stroke={col} strokeWidth={1.2} {...ns} /><rect x={4} y={-15.5} width={30} height={7} rx={1.5} fill="var(--text)" /><text x={19} y={-10.3} fontSize={4.2} textAnchor="middle" fill="var(--bg)" fontWeight={700} letterSpacing={0.3}>⇗ OUTBOUND</text></g>; })}
+      {drag?.kind === 'wire' && geom.get(drag.from) && <path d={`M ${geom.get(drag.from)!.x + geom.get(drag.from)!.s / 2} ${geom.get(drag.from)!.y + geom.get(drag.from)!.s / 2} L ${drag.x} ${drag.y}`} fill="none" stroke="var(--primary)" strokeWidth={1.5} strokeDasharray="4 3" strokeLinecap="round" style={{ pointerEvents: 'none' }} {...ns} />}
     </g>
   </svg>;
 }
@@ -214,7 +269,7 @@ function AddRackDeviceForm({ rack, templates, position, templateId, onDone }: { 
 function exportPng(name: string) {
   const svg = document.querySelector('svg.editor-canvas') as SVGSVGElement | null; if (!svg) return;
   const clone = svg.cloneNode(true) as SVGSVGElement; const vb = svg.viewBox.baseVal; clone.setAttribute('width', String(vb.width * 2)); clone.setAttribute('height', String(vb.height * 2));
-  const css = getComputedStyle(document.documentElement); const vars = ['--surface', '--surface-2', '--border', '--border-strong', '--text', '--muted', '--primary', '--port-none', '--port-complete', '--port-incomplete', '--port-keystone', '--rack-rail', '--user', '--amber', '--bg', '--mono'];
+  const css = getComputedStyle(document.documentElement); const vars = ['--surface', '--surface-2', '--border', '--border-strong', '--text', '--muted', '--primary', '--port-none', '--port-complete', '--port-incomplete', '--port-keystone', '--rack-rail', '--rack-interior', '--rack-hole', '--rack-base', '--rack-panel', '--rack-label', '--rack-tray', '--accent', '--user', '--amber', '--bg', '--mono'];
   let xml = new XMLSerializer().serializeToString(clone); for (const v of vars) xml = xml.split(`var(${v})`).join(css.getPropertyValue(v).trim() || '#000');
   const blob = new Blob([xml], { type: 'image/svg+xml' }); const url = URL.createObjectURL(blob); const img = new Image();
   img.onload = () => { const c = document.createElement('canvas'); c.width = vb.width * 2; c.height = vb.height * 2; const ctx = c.getContext('2d')!; ctx.fillStyle = css.getPropertyValue('--surface').trim() || '#fff'; ctx.fillRect(0, 0, c.width, c.height); ctx.drawImage(img, 0, 0); const a = document.createElement('a'); a.download = `${name}.png`; a.href = c.toDataURL('image/png'); a.click(); URL.revokeObjectURL(url); };
