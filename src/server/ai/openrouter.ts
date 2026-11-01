@@ -3,8 +3,6 @@ import { PDFParse } from 'pdf-parse';
 import { openaiTools, type ToolContext } from './tools.js';
 import type { Attachment } from './chat.js';
 
-export const OPENROUTER_MODEL = process.env.RACKDOCS_AI_MODEL ?? 'openai/gpt-4o';
-export function openrouterEnabled() { return !!process.env.OPENROUTER_API_KEY; }
 
 type Msg = OpenAI.Chat.Completions.ChatCompletionMessageParam;
 
@@ -25,13 +23,13 @@ export async function attachmentParts(atts: Attachment[]): Promise<OpenAI.Chat.C
 export interface RunResult { messages: Msg[]; usage: { input: number; output: number } | null; model: string }
 
 /** Streams one assistant turn (with tool calls) over OpenRouter's OpenAI-compatible API. */
-export async function runOpenRouter(opts: { system: string; messages: Msg[]; ctx: ToolContext; send: (ev: Record<string, unknown>) => void; record: (ev: Record<string, unknown>) => void }): Promise<RunResult> {
-  const client = new OpenAI({ apiKey: process.env.OPENROUTER_API_KEY, baseURL: process.env.OPENROUTER_BASE_URL ?? 'https://openrouter.ai/api/v1', defaultHeaders: { 'HTTP-Referer': 'https://github.com/damiankw/patching', 'X-Title': 'Rackdocs' } });
+export async function runOpenRouter(opts: { system: string; messages: Msg[]; ctx: ToolContext; send: (ev: Record<string, unknown>) => void; record: (ev: Record<string, unknown>) => void; apiKey: string; model: string }): Promise<RunResult> {
+  const client = new OpenAI({ apiKey: opts.apiKey, baseURL: process.env.OPENROUTER_BASE_URL ?? 'https://openrouter.ai/api/v1', defaultHeaders: { 'HTTP-Referer': 'https://github.com/damiankw/patching', 'X-Title': 'Rackdocs' } });
   const { defs, runners } = openaiTools(opts.ctx);
   const messages: Msg[] = [{ role: 'system', content: opts.system }, ...opts.messages];
-  const acc = { input: 0, output: 0 }; let sawUsage = false; let model = OPENROUTER_MODEL;
+  const acc = { input: 0, output: 0 }; let sawUsage = false; let model = opts.model;
   for (let iter = 0; iter < 80; iter++) {
-    const stream = await client.chat.completions.create({ model: OPENROUTER_MODEL, messages, tools: defs, tool_choice: 'auto', stream: true, stream_options: { include_usage: true }, max_tokens: 16000 });
+    const stream = await client.chat.completions.create({ model: opts.model, messages, tools: defs, tool_choice: 'auto', stream: true, stream_options: { include_usage: true }, max_tokens: 16000 });
     let text = ''; const calls = new Map<number, { id: string; name: string; args: string }>(); let finish: string | null = null;
     for await (const chunk of stream) {
       if (chunk.usage) { sawUsage = true; acc.input += chunk.usage.prompt_tokens ?? 0; acc.output += chunk.usage.completion_tokens ?? 0; }

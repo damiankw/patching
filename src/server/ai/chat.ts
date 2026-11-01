@@ -3,21 +3,53 @@ import OpenAI from 'openai';
 import type { Response } from 'express';
 import { db, getMeta } from '../db.js';
 import { makeTools } from './tools.js';
-import { OPENROUTER_MODEL, attachmentParts, openrouterEnabled, runOpenRouter } from './openrouter.js';
+import { attachmentParts, runOpenRouter } from './openrouter.js';
 
 export type Provider = 'openrouter' | 'anthropic';
-/** openrouter when OPENROUTER_API_KEY is set (or RACKDOCS_AI_PROVIDER says so); anthropic only when chosen explicitly or it is the only key present. */
-export function aiProvider(): Provider {
-  const p = process.env.RACKDOCS_AI_PROVIDER;
-  if (p === 'anthropic' || p === 'openrouter') return p;
-  if (openrouterEnabled()) return 'openrouter';
-  return 'anthropic';
+export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+export const DEFAULT_MODEL: Record<Provider, string> = { openrouter: 'openai/gpt-4o', anthropic: 'claude-opus-5-5' };
+
+/**
+ * AI configuration lives in the app database (Settings page) and can be overridden by
+ * environment variables for people who prefer those. Settings win over env when set.
+ */
+export interface AiConfig { provider: Provider; model: string; effort: Effort; apiKey: string; keySource: 'settings' | 'env' | 'none' }
+export function aiConfig(): AiConfig {
+  const envProvider = process.env.RACKDOCS_AI_PROVIDER;
+  const stored = getMeta('ai_provider');
+  const provider: Provider = (stored === 'anthropic' || stored === 'openrouter') ? stored : (envProvider === 'anthropic' || envProvider === 'openrouter') ? envProvider : (process.env.OPENROUTER_API_KEY ? 'openrouter' : 'anthropic');
+  const storedKey = getMeta(provider === 'openrouter' ? 'ai_key_openrouter' : 'ai_key_anthropic');
+  const envKey = provider === 'openrouter' ? process.env.OPENROUTER_API_KEY : (process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN);
+  const model = getMeta(`ai_model_${provider}`) || process.env.RACKDOCS_AI_MODEL || DEFAULT_MODEL[provider];
+  const effort = (getMeta('ai_effort') || process.env.RACKDOCS_AI_EFFORT || 'medium') as Effort;
+  return { provider, model, effort, apiKey: storedKey || envKey || '', keySource: storedKey ? 'settings' : envKey ? 'env' : 'none' };
 }
-export const ANTHROPIC_MODEL = process.env.RACKDOCS_AI_MODEL ?? 'claude-opus-5-5';
-export function aiModel() { return aiProvider() === 'openrouter' ? OPENROUTER_MODEL : ANTHROPIC_MODEL; }
-export const AI_EFFORT = (process.env.RACKDOCS_AI_EFFORT ?? 'medium') as 'low' | 'medium' | 'high' | 'xhigh' | 'max';
-export function aiEnabled() { return aiProvider() === 'openrouter' ? openrouterEnabled() : !!(process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN); }
+export function aiProvider() { return aiConfig().provider; }
+export function aiModel() { return aiConfig().model; }
+export function aiEnabled() { return !!aiConfig().apiKey; }
 export const SYSTEM_PROMPT = () => SYSTEM;
+
+/** Cheap connectivity check for the Settings page: validates the key and that the model exists. */
+export async function testAi(): Promise<{ ok: boolean; message: string }> {
+  const cfg = aiConfig();
+  if (!cfg.apiKey) return { ok: false, message: 'No API key saved for this provider.' };
+  try {
+    if (cfg.provider === 'openrouter') {
+      const client = new OpenAI({ apiKey: cfg.apiKey, baseURL: process.env.OPENROUTER_BASE_URL ?? 'https://openrouter.ai/api/v1' });
+      const models = await client.models.list();
+      const found = models.data.find((m) => m.id === cfg.model);
+      return found ? { ok: true, message: `Connected to OpenRouter. Model ${cfg.model} is available.` } : { ok: false, message: `Connected to OpenRouter, but model "${cfg.model}" was not found. Check the id on openrouter.ai/models.` };
+    }
+    const client = new Anthropic({ apiKey: cfg.apiKey });
+    const r = await client.messages.countTokens({ model: cfg.model, messages: [{ role: 'user', content: 'ping' }] });
+    return { ok: true, message: `Connected to the Anthropic API. Model ${cfg.model} responds (${r.input_tokens} tokens counted).` };
+  } catch (err) {
+    if (err instanceof Anthropic.AuthenticationError || err instanceof OpenAI.AuthenticationError) return { ok: false, message: 'The API key was rejected.' };
+    if (err instanceof Anthropic.NotFoundError || err instanceof OpenAI.NotFoundError) return { ok: false, message: `Model "${cfg.model}" was not found for this provider.` };
+    if (err instanceof Anthropic.APIConnectionError || err instanceof OpenAI.APIConnectionError) return { ok: false, message: 'Could not reach the provider from the server. Check outbound network access.' };
+    return { ok: false, message: err instanceof Error ? err.message : String(err) };
+  }
+}
 
 const SYSTEM = `You are the documentation assistant inside Rackdocs, a self-hosted network and rack documentation tool. You help the user build and maintain their documentation from natural language and from documents they upload (spreadsheets exported as CSV, PDFs, photos of racks, notes).
 
@@ -71,7 +103,7 @@ export async function runTurn(opts: { userId: number; conversationId: number; te
   const transcript = convo.transcript;
   const send = (ev: Record<string, unknown>) => { if (!res.writableEnded) res.write(`data: ${JSON.stringify(ev)}\n\n`); };
   const record = (ev: Record<string, unknown>) => { transcript.push(ev); send(ev); };
-  const provider = aiProvider();
+  const cfg = aiConfig(); const provider = cfg.provider;
   const persist = (messages: unknown[]) => db.prepare("UPDATE ai_conversations SET messages = ?, transcript = ?, title = ?, provider = ?, updated_at = datetime('now') WHERE id = ?").run(JSON.stringify(messages), JSON.stringify(transcript), convo.title === 'New conversation' ? opts.text.slice(0, 60) || convo.title : convo.title, provider, convo.id);
   // Message history is provider-specific; switching providers starts the model with a fresh context (the visible transcript is kept).
   const history = convo.provider === provider ? convo.messages : [];
@@ -86,14 +118,14 @@ export async function runTurn(opts: { userId: number; conversationId: number; te
     const msgs = [...(history as OpenAI.Chat.Completions.ChatCompletionMessageParam[]), { role: 'user' as const, content: parts }];
     persist(msgs);
     try {
-      const r = await runOpenRouter({ system: systemText, messages: msgs, ctx, send, record });
+      const r = await runOpenRouter({ system: systemText, messages: msgs, ctx, send, record, apiKey: cfg.apiKey, model: cfg.model });
       persist(r.messages);
       record({ type: 'done', usage: r.usage ? { input: r.usage.input, output: r.usage.output, cached: 0 } : null, model: r.model });
     } catch (err) {
       let message: string;
       if (err instanceof OpenAI.AuthenticationError) message = 'OpenRouter rejected the API key. Check OPENROUTER_API_KEY on the server.';
       else if (err instanceof OpenAI.RateLimitError) message = 'Rate limited by OpenRouter. Try again in a moment.';
-      else if (err instanceof OpenAI.NotFoundError) message = `OpenRouter does not know the model "${OPENROUTER_MODEL}". Set RACKDOCS_AI_MODEL to a model id from openrouter.ai/models that supports tool calling.`;
+      else if (err instanceof OpenAI.NotFoundError) message = `OpenRouter does not know the model "${cfg.model}". Pick a model id from openrouter.ai/models that supports tool calling (Settings page).`;
       else if (err instanceof OpenAI.BadRequestError) message = `OpenRouter rejected the request: ${err.message}`;
       else if (err instanceof OpenAI.APIConnectionError) message = 'Could not reach OpenRouter from the server. Check outbound network access.';
       else if (err instanceof OpenAI.APIError) message = `OpenRouter error ${err.status}: ${err.message}`;
@@ -107,12 +139,12 @@ export async function runTurn(opts: { userId: number; conversationId: number; te
   const messages: Msg[] = [...(history as Msg[]), { role: 'user', content: userContent }];
   persist(messages);
 
-  const client = new Anthropic();
+  const client = new Anthropic({ apiKey: cfg.apiKey });
   const tools = makeTools(ctx);
   let runner = client.beta.messages.toolRunner({
-    model: ANTHROPIC_MODEL, max_tokens: 16000, stream: true, max_iterations: 80,
+    model: cfg.model, max_tokens: 16000, stream: true, max_iterations: 80,
     betas: ['server-side-fallback-2026-07-01'], fallbacks: 'default',
-    output_config: { effort: AI_EFFORT },
+    output_config: { effort: cfg.effort },
     system: [{ type: 'text', text: systemText, cache_control: { type: 'ephemeral' } }],
     tools, messages,
   });
@@ -142,10 +174,10 @@ export async function runTurn(opts: { userId: number; conversationId: number; te
     const msgs = [...runner.params.messages] as Msg[];
     if (final && (msgs.length === 0 || msgs[msgs.length - 1].role !== 'assistant')) msgs.push({ role: 'assistant', content: final.content });
     persist(msgs);
-    record({ type: 'done', usage: final ? { input: final.usage.input_tokens, output: final.usage.output_tokens, cached: final.usage.cache_read_input_tokens ?? 0 } : null, model: final?.model ?? ANTHROPIC_MODEL });
+    record({ type: 'done', usage: final ? { input: final.usage.input_tokens, output: final.usage.output_tokens, cached: final.usage.cache_read_input_tokens ?? 0 } : null, model: final?.model ?? cfg.model });
   } catch (err) {
     let message: string;
-    if (err instanceof Anthropic.AuthenticationError) message = 'The Anthropic API key was rejected. Check ANTHROPIC_API_KEY on the server.';
+    if (err instanceof Anthropic.AuthenticationError) message = 'The Anthropic API key was rejected. Check it on the Settings page.';
     else if (err instanceof Anthropic.RateLimitError) message = 'Rate limited by the Anthropic API. Try again in a moment.';
     else if (err instanceof Anthropic.BadRequestError) message = `The API rejected the request: ${err.message}`;
     else if (err instanceof Anthropic.APIConnectionError) message = 'Could not reach the Anthropic API from the server. Check outbound network access.';

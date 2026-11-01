@@ -63,7 +63,7 @@ export function Assistant() {
       {convos.data?.length === 0 && <div className="muted small" style={{ padding: 10 }}>No conversations yet.</div>}
     </aside>
     <div className="ai-main">
-      {!status.data?.enabled && <div className="ai-banner">The assistant needs a model API key on the server: set <code>OPENROUTER_API_KEY</code> (and <code>RACKDOCS_AI_MODEL</code>) or <code>ANTHROPIC_API_KEY</code>, then restart. See <Link to="/settings">Settings</Link>.</div>}
+      {!status.data?.enabled && <div className="ai-banner">The assistant is not configured yet. An admin can add an OpenRouter or Anthropic API key and pick a model on the <Link to="/settings">Settings</Link> page.</div>}
       <div className="ai-messages">
         {events.length === 0 && <div className="ai-empty"><Sparkles size={28} className="muted" /><h2>What would you like to document?</h2><p className="muted">Describe your network in plain language or attach exports, PDFs, notes and rack photos. The assistant reads them and builds locations, racks, devices, cabling and VLANs through the same checks you use, and logs every change in the Activity Log.</p>
           {canEdit && <div className="ai-suggestions">{SUGGESTIONS.map((s) => <button key={s} className="ai-chip" onClick={() => sendMsg(s)}>{s}</button>)}</div>}</div>}

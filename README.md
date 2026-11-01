@@ -17,14 +17,11 @@ Self-hosted network and rack documentation for internal use, modelled on the wor
 
 The **AI Assistant** page lets you build and change the documentation in plain language, including from uploaded material: PDFs, photos of racks, CSV exports of spreadsheets, text notes. It works through the app's own API as the signed-in user: every change goes through the same validation as a manual edit and is recorded in the Activity Log under that user's name. It never deletes anything unless you explicitly ask.
 
-It talks to a model through **OpenRouter** by default, so you can pick any model there that supports tool calling. Set these where Rackdocs runs and restart:
+Configure it on the **Settings** page as an admin: choose OpenRouter or the Anthropic API, paste the API key, pick a model, and click **Test connection**. The key is stored in the Rackdocs database. No restart is needed.
 
-```bash
-OPENROUTER_API_KEY=sk-or-...
-RACKDOCS_AI_MODEL=openai/gpt-4o        # any model id from openrouter.ai/models with tool support
-```
+OpenRouter lets you pick any model there that supports tool calling (for example `openai/gpt-4o`). On the Anthropic API the default is `claude-opus-5-5`.
 
-The Anthropic API is also supported: set `ANTHROPIC_API_KEY`, `RACKDOCS_AI_PROVIDER=anthropic` and optionally `RACKDOCS_AI_MODEL=claude-opus-5-5`. With Docker, put the variables in a `.env` file next to `docker-compose.yml`.
+If you prefer environment variables, they work as a fallback when nothing is saved in Settings: `OPENROUTER_API_KEY` or `ANTHROPIC_API_KEY`, `RACKDOCS_AI_PROVIDER`, `RACKDOCS_AI_MODEL`. Note that `VAR=value` on its own line only sets a shell variable; either `export` it or put it on the same line as the command: `OPENROUTER_API_KEY=sk-or-... npm start`.
 
 What it can do: create locations, floors, rooms, racks and floor devices; mount rack devices from templates or create new templates; add building and user connections (it knows the keystone rule); create VLANs and WLANs and assign them to ports; rename, move and annotate devices; answer questions about what is connected where. PDFs are read as text on the server (scanned PDFs without a text layer will not work through OpenRouter); images go to the model directly. Office files are not read: export Word and Excel documents to PDF or CSV first.
 
@@ -86,10 +83,10 @@ For development with hot reload (`npm run dev`), the web app is on port 5173 and
 | `PORT` | `3000` | HTTP port |
 | `DATA_DIR` | `./data` (or `/data` in Docker) | Folder holding `rackdocs.db` and `uploads/` |
 | `COOKIE_SECURE` | unset | Set to `1` when served over HTTPS so the session cookie is marked Secure |
-| `OPENROUTER_API_KEY` | unset | Enables the AI Assistant through OpenRouter |
+| `OPENROUTER_API_KEY` | unset | Fallback for the AI Assistant key when none is saved in Settings |
 | `RACKDOCS_AI_MODEL` | `openai/gpt-4o` (OpenRouter) or `claude-opus-5-5` (Anthropic) | Model used by the assistant |
 | `RACKDOCS_AI_PROVIDER` | auto | `openrouter` or `anthropic` |
-| `ANTHROPIC_API_KEY` | unset | Enables the assistant through the Anthropic API |
+| `ANTHROPIC_API_KEY` | unset | Fallback key for the Anthropic provider |
 | `RACKDOCS_AI_EFFORT` | `medium` | Anthropic only: `low`, `medium`, `high` |
 
 ## Quickstart
