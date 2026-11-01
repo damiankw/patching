@@ -27,7 +27,7 @@ export function DeviceSettings({ device, canEdit, onChanged, selectedPortId, onS
   const f = (label: string, key: keyof typeof values, type = 'text') => <Field label={label}><input type={type} value={String(values[key] ?? '')} onChange={(e) => set(key, (type === 'number' ? Number(e.target.value) : e.target.value) as never)} disabled={dis} /></Field>;
   return <div className="sidebar-scroll">
     {extraTop}
-    {device.passive === 1 && canEdit && <button className="sidebar-link" onClick={() => setModal('building')}>Manage building connections</button>}
+    {device.passive === 1 && canEdit && <button className="sidebar-link" onClick={() => setModal('building')} title="Record the permanent cabling behind each port: which outlet or patch panel port it runs to">Manage building connections</button>}
     <Section title="Settings" right={<SaveStatus status={status} />}>
       <Field label="ID" required><input value={values.code} onChange={(e) => set('code', e.target.value.toUpperCase())} disabled={dis} className="code" /></Field>
       {f('Name', 'name')}
@@ -39,7 +39,7 @@ export function DeviceSettings({ device, canEdit, onChanged, selectedPortId, onS
       {device.template_name && <Field label="Template"><input value={device.template_name} disabled /></Field>}
       {f('Manufacturer', 'manufacturer')}{f('Model name', 'model')}{f('Serial number', 'serial')}{f('Purchase date', 'purchase_date', 'date')}{f('Operation start', 'operation_start', 'date')}
     </Section>
-    {!device.is_rack && <PortsSection device={device} canEdit={canEdit} selectedPortId={selectedPortId} onSelectPort={onSelectPort} onChanged={onChanged} onConnect={(p) => { setConnectPort(p); setModal('connect'); }} onTrace={(p) => setModal({ trace: p.id })} onAdd={() => setModal('addPort')} onDelete={(p) => setModal({ delPort: p })} />}
+    {!device.is_rack && <PortsSection device={device} canEdit={canEdit} selectedPortId={selectedPortId} onSelectPort={onSelectPort} onChanged={onChanged} onConnect={(p) => { setConnectPort(p); setModal('connect'); }} onTrace={(p) => setModal({ trace: p.id })} onAdd={() => setModal('addPort')} onDelete={(p) => setModal({ delPort: p })} onManageBuilding={() => setModal('building')} />}
     {port && <PortSettings port={port} canEdit={canEdit} onChanged={onChanged} />}
     <Section title="Photos" defaultOpen={device.photos.length > 0}>
       <div className="photos">{device.photos.map((ph) => <a key={ph.id} href={`/api/files/${ph.uuid}`} target="_blank" rel="noreferrer"><img className="photo" src={`/api/files/${ph.uuid}`} alt={ph.name} title={canEdit ? 'Click to open · shift-click to remove' : ph.name} onClick={async (e) => { if (e.shiftKey && canEdit) { e.preventDefault(); await api.del(`/photos/${ph.id}`); onChanged(); } }} /></a>)}</div>
@@ -58,7 +58,7 @@ export function DeviceSettings({ device, canEdit, onChanged, selectedPortId, onS
 export function NotesEditor({ value, onSave }: { value: string; onSave: (v: string) => Promise<void> }) { const [v, setV] = useState(value); return <Form submitLabel="Save" onSubmit={() => onSave(v)}><textarea rows={8} value={v} onChange={(e) => setV(e.target.value)} autoFocus /></Form>; }
 
 // ---------- Ports section ----------
-export function PortsSection({ device, canEdit, selectedPortId, onSelectPort, onChanged, onConnect, onTrace, onAdd, onDelete }: { device: DeviceDetail; canEdit: boolean; selectedPortId: number | null; onSelectPort: (id: number | null) => void; onChanged: () => Promise<unknown>; onConnect: (p: Port) => void; onTrace: (p: Port) => void; onAdd: () => void; onDelete: (p: Port) => void }) {
+export function PortsSection({ device, canEdit, selectedPortId, onSelectPort, onChanged, onConnect, onTrace, onAdd, onDelete, onManageBuilding }: { device: DeviceDetail; canEdit: boolean; selectedPortId: number | null; onSelectPort: (id: number | null) => void; onChanged: () => Promise<unknown>; onConnect: (p: Port) => void; onTrace: (p: Port) => void; onAdd: () => void; onDelete: (p: Port) => void; onManageBuilding?: () => void }) {
   const toast = useToast(); const [disc, setDisc] = useState<Port | null>(null);
   const wired = device.ports.filter((p) => p.kind !== 'wireless'); const wireless = device.ports.filter((p) => p.kind === 'wireless');
   const row = (p: Port) => {
@@ -73,6 +73,7 @@ export function PortsSection({ device, canEdit, selectedPortId, onSelectPort, on
           {canEdit && p.user && <IconBtn title="Disconnect" onClick={() => setDisc(p)}><Unplug size={13} /></IconBtn>}
           {canEdit && <IconBtn title="Delete port" danger onClick={() => onDelete(p)}><Trash2 size={13} /></IconBtn>}
         </span></div>
+      {p.passive === 1 && !p.keystone && p.kind !== 'wireless' && <div className="port-hint">No building connection yet, so nothing can be patched here. {canEdit && onManageBuilding ? <button className="btn-link" onClick={onManageBuilding}>Add building connection</button> : 'Ask an editor to add one.'}</div>}
       {p.chain && p.chain.steps.length > 1 && <div className="port-chain">{p.chain.steps.map((s, i) => <div key={i} className={`hop${i === meIdx ? ' me' : ''}`}><span className="hop-arrow">{i === 0 ? '┌' : i === p.chain!.steps.length - 1 ? '└' : '├'}{s.via === 'building' ? '╌' : '─'}</span><Link to={portLink(s)} title={s.via ? `${s.via} connection` : ''}>{s.path}</Link></div>)}{!p.chain.complete && <div className="muted" style={{ paddingLeft: 14 }}>incomplete: not terminated at an active device</div>}</div>}
     </div>;
   };
@@ -158,7 +159,7 @@ export function BuildingConnectionsDialog({ device, onDone }: { device: DeviceDe
   useEffect(() => { if (tree.data) setRows((rs) => rs.map((r) => { const f = tree.data!.floors.find((x) => x.id === r.floor_id); return { ...r, location_id: f?.location_id ?? r.location_id }; })); }, [tree.data]);
   const [err, setErr] = useState<string | null>(null); const [saving, setSaving] = useState(false);
   return <div className="form">
-    <div className="muted small">One row per port. Pick where the other end of the permanent cable terminates: a patch panel port in a rack, or another outlet. Cleared rows remove the building connection.</div>
+    <div className="muted small">One row per port. Pick where the other end of the permanent (in-wall) cable terminates: a patch panel port in a rack, or another outlet. Cleared rows remove the building connection.{device.rack_id ? ' Tip: if there is no outlet to choose yet, add a Telecommunications Outlet on the floor plan first.' : ''}</div>
     <div className="bc-grid"><span className="hd">Port</span><span className="hd">Location</span><span className="hd">Floor</span><span className="hd">Room</span><span className="hd">Rack / device</span><span className="hd">Port</span><span />
       {rows.map((r, i) => <BuildingRow key={r.port.id} row={r} tree={tree.data} deviceId={device.id} onChange={(nr) => setRows(rows.map((x, k) => k === i ? nr : x))} />)}</div>
     {err && <ErrorBox error={err} />}
@@ -175,7 +176,7 @@ function BuildingRow({ row, tree, deviceId, onChange }: { row: { port: Port; loc
     {sel(row.location_id, (v) => { const lid = Number(v); const f = tree?.floors.find((x) => x.location_id === lid); onChange({ ...row, location_id: lid, floor_id: f?.id ?? 0, room_id: null, rack_id: null, device_id: null, target_port_id: null }); }, tree?.locations.map((l) => ({ value: l.id, label: l.code })) ?? [])}
     {sel(row.floor_id, (v) => onChange({ ...row, floor_id: Number(v), room_id: null, device_id: null, target_port_id: null }), floors.map((f) => ({ value: f.id, label: f.code })))}
     {sel(row.room_id, (v) => onChange({ ...row, room_id: v ? Number(v) : null, device_id: null, target_port_id: null }), rooms.map((r) => ({ value: r.id, label: r.code })), 'DEFAULT')}
-    {sel(row.device_id, (v) => onChange({ ...row, device_id: v ? Number(v) : null, target_port_id: null }), devs.map((d) => ({ value: d.id, label: `${d.rack_code ? d.rack_code + ' / ' : ''}${d.code} (${d.type_name})` })), cands.isLoading ? 'Loading…' : devs.length ? 'Select…' : 'No outlets or panels here')}
+    {sel(row.device_id, (v) => onChange({ ...row, device_id: v ? Number(v) : null, target_port_id: null }), devs.map((d) => ({ value: d.id, label: `${d.rack_code ? d.rack_code + ' / ' : ''}${d.code} (${d.type_name})` })), cands.isLoading ? 'Loading…' : devs.length ? 'Select…' : 'No outlets or patch panels in this room')}
     {sel(row.target_port_id, (v) => onChange({ ...row, target_port_id: v ? Number(v) : null }), (dev?.ports ?? []).filter((p) => p.available || p.id === row.target_port_id).map((p) => ({ value: p.id, label: p.name })))}
     <IconBtn title="Clear" onClick={() => onChange({ ...row, device_id: null, target_port_id: null })}><X size={13} /></IconBtn>
   </>;
