@@ -7,7 +7,7 @@ import { useCanEdit } from '../lib/auth';
 import type { Connection, Device, DeviceDetail, Port, RackDetail, Template, Vlan } from '../lib/types';
 import { usePageHeader } from '../components/Shell';
 import { Confirm, Dialog, ErrorBox, Field, Form, IconBtn, Loading, Menu, SaveStatus, Tabs, errMsg, useToast } from '../components/ui';
-import { ConnectionsTable, DeviceSettings, useTypes } from '../components/editor';
+import { ConnectionConfigurator, ConnectionsTable, DeviceSettings, useTypes } from '../components/editor';
 import { ShortcutsHelp } from './LocationView';
 import { panelLayout } from './DeviceLibrary';
 import { zoomAt, type View } from '../components/canvas';
@@ -27,7 +27,7 @@ export function RackEditor() {
   const [panelsHidden, setPanelsHidden] = useState(false); const [sidebarHidden, setSidebarHidden] = useState(false); const [bottomOpen, setBottomOpen] = useState(false); const [bottomTab, setBottomTab] = useState('devices'); const [connFilter, setConnFilter] = useState('all');
   const [hlVlan, setHlVlan] = useState<Vlan | null>(null); const [hoverChain, setHoverChain] = useState<Set<number> | null>(null);
   const [status, setStatus] = useState<'saved' | 'saving' | 'error'>('saved');
-  const [modal, setModal] = useState<null | { kind: 'add'; position: number; templateId?: number } | { kind: 'delDev'; dev: RackDevice } | { kind: 'disc'; port: Port } | { kind: 'shortcuts' } | { kind: 'delRack' }>(null);
+  const [modal, setModal] = useState<null | { kind: 'add'; position: number; templateId?: number } | { kind: 'delDev'; dev: RackDevice } | { kind: 'disc'; port: Port } | { kind: 'shortcuts' } | { kind: 'delRack' } | { kind: 'configure'; fromDev: RackDevice; fromPort: Port; targetDev: number }>(null);
   const refresh = () => Promise.all([qc.invalidateQueries({ queryKey: ['rack', id] }), qc.invalidateQueries({ queryKey: ['connections'] }), qc.invalidateQueries({ queryKey: ['device'] }), qc.invalidateQueries({ queryKey: ['racks'] }), qc.invalidateQueries({ queryKey: ['floor-view'] })]);
   useEffect(() => { const d = sp.get('device'); if (d) { setSelDev(Number(d)); sp.delete('device'); setSp(sp, { replace: true }); } }, [sp, setSp]);
   const rack = q.data;
@@ -63,7 +63,7 @@ export function RackEditor() {
           <RackCanvas rack={rack} face={face} view={view} setView={setView} fitMode={fitMode} selDev={selDev} selPort={selPort} canEdit={canEdit} hoverChain={hoverChain} setHoverChain={setHoverChain} vlanPorts={vlanPorts} conns={conns.data ?? []}
             onSelectDevice={(d) => { setSelDev(d); setSelPort(null); }} onSelectPort={(dev, p) => { setSelDev(dev); setSelPort(p); }} onEmptyClick={(u) => canEdit && setModal({ kind: 'add', position: u })}
             onDropTemplate={(tplId, u) => setModal({ kind: 'add', position: u, templateId: tplId })} onMoveDevice={(devId, u) => act(() => api.patch(`/devices/${devId}`, { position_u: u }))}
-            onConnect={(a, b) => act(() => api.post('/connections', { port_a_id: a, port_b_id: b, type: 'user' }))} onClearVlan={() => setHlVlan(null)} onKeystoneMissing={(p, d) => { setSelDev(d.id); setSelPort(p.id); toast(`${d.code} port ${p.name} has no building connection yet. Use "Manage building connections" in the sidebar to record the cable from this port to a wall outlet, then patch it.`, 'error'); }} />
+            onConnect={(a, b) => act(() => api.post('/connections', { port_a_id: a, port_b_id: b, type: 'user' }))} onClearVlan={() => setHlVlan(null)} onWireToDevice={(fromPort, deviceId) => { const from = portById.get(fromPort); if (from) setModal({ kind: 'configure', fromDev: from.dev, fromPort: from.port, targetDev: deviceId }); }} onKeystoneMissing={(p, d) => { setSelDev(d.id); setSelPort(p.id); toast(`${d.code} port ${p.name} has no building connection yet. Use "Manage building connections" in the sidebar to record the cable from this port to a wall outlet, then patch it.`, 'error'); }} />
         </div>
         {!panelsHidden && <div className="bottom-panel">
           <div className="bottom-head" onClick={() => setBottomOpen(!bottomOpen)}><PanelBottom size={14} /><span>DEVICES & CONNECTIONS</span>{bottomOpen && <span onClick={(e) => e.stopPropagation()}><Tabs pill tabs={[{ id: 'devices', label: 'DEVICES' }, { id: 'connections', label: 'CONNECTIONS' }, { id: 'vlans', label: 'VLANS' }]} value={bottomTab} onChange={setBottomTab} /></span>}<span className="grow" /></div>
@@ -87,6 +87,7 @@ export function RackEditor() {
     <Confirm open={modal?.kind === 'disc'} onClose={() => setModal(null)} title="Disconnect" label="Disconnect" text={modal?.kind === 'disc' ? `Remove the user connection on ${modal.port.path}?` : ''} onConfirm={async () => { if (modal?.kind === 'disc' && modal.port.user_peer) { await api.del(`/connections/${modal.port.user_peer.connection_id}`); await refresh(); } }} />
     <Confirm open={modal?.kind === 'delRack'} onClose={() => setModal(null)} title="Delete rack" text={`Delete ${rack.path} with ${rack.devices.length} devices and their connections?`} onConfirm={async () => { await api.del(`/devices/${rack.id}`); await refresh(); nav(`/floors/${rack.floor_id}`); }} />
     <Dialog open={modal?.kind === 'shortcuts'} onClose={() => setModal(null)} title="Keyboard shortcuts"><ShortcutsHelp /></Dialog>
+    <Dialog open={modal?.kind === 'configure'} onClose={() => setModal(null)} title={<>Connection Configurator: <span className="code">{modal?.kind === 'configure' ? modal.fromDev.code : ''}</span></>} subtitle="Pick the port on the other device. Back-side ports are listed too." wide>{modal?.kind === 'configure' && <ConnectionConfigurator device={{ ...modal.fromDev, photos: [], rack_device_count: 0 }} port={modal.fromPort} expandDeviceId={modal.targetDev} onDone={async () => { setModal(null); await refresh(); }} />}</Dialog>
     {void types}
   </div>;
 }
@@ -100,13 +101,13 @@ function RackDeviceSidebar({ id, canEdit, onChanged, selPort, setSelPort, isRack
 function TemplatePalette({ templates, canEdit }: { templates: Template[]; canEdit: boolean }) {
   const [q, setQ] = useState('');
   const groups = useMemo(() => { const m = new Map<string, Template[]>(); for (const t of templates) { if (q && !`${t.name} ${t.brand} ${t.type_name}`.toLowerCase().includes(q.toLowerCase())) continue; m.set(t.type_name, [...(m.get(t.type_name) ?? []), t]); } return [...m.entries()].sort((a, b) => a[0].localeCompare(b[0])); }, [templates, q]);
-  return <div className="palette-panel"><div className="palette-head"><h3>Devices</h3><div className="muted tiny">Drag device to a rack unit to add it.</div><div style={{ position: 'relative', marginTop: 6 }}><Search size={12} className="muted" style={{ position: 'absolute', left: 7, top: 8 }} /><input placeholder="Search" value={q} onChange={(e) => setQ(e.target.value)} style={{ paddingLeft: 22, fontSize: 12 }} /></div></div>
+  return <div className="palette-panel"><div className="palette-head"><h3>Devices</h3><div className="muted tiny">Drag device to a rack unit to add it. To patch, drag from port to port, or drop the cable on a device to pick a port on its other side.</div><div style={{ position: 'relative', marginTop: 6 }}><Search size={12} className="muted" style={{ position: 'absolute', left: 7, top: 8 }} /><input placeholder="Search" value={q} onChange={(e) => setQ(e.target.value)} style={{ paddingLeft: 22, fontSize: 12 }} /></div></div>
     <div className="palette-list-items">{groups.map(([type, list]) => <div key={type}><div className="palette-group-label">{type}</div>{list.map((t) => <div key={t.id} className="palette-item-dev" draggable={canEdit} onDragStart={(e) => { e.dataTransfer.setData('text/rd-template', String(t.id)); e.dataTransfer.effectAllowed = 'copy'; }} title={`${t.height_u}U · ${t.ports.length} ports`}><span style={{ flex: 1 }}>{t.name}</span><span className="muted tiny">{t.height_u}U</span></div>)}</div>)}</div></div>;
 }
 
-function RackCanvas({ rack, face, view, setView, fitMode, selDev, selPort, canEdit, hoverChain, setHoverChain, vlanPorts, conns, onSelectDevice, onSelectPort, onEmptyClick, onDropTemplate, onMoveDevice, onConnect, onClearVlan, onKeystoneMissing }: {
+function RackCanvas({ rack, face, view, setView, fitMode, selDev, selPort, canEdit, hoverChain, setHoverChain, vlanPorts, conns, onSelectDevice, onSelectPort, onEmptyClick, onDropTemplate, onMoveDevice, onConnect, onClearVlan, onKeystoneMissing, onWireToDevice }: {
   rack: RackDetail; face: Face; view: View; setView: (v: View) => void; fitMode: 'height' | 'width'; selDev: number | null; selPort: number | null; canEdit: boolean; hoverChain: Set<number> | null; setHoverChain: (s: Set<number> | null) => void; vlanPorts: Set<number> | null; conns: Connection[];
-  onSelectDevice: (id: number | null) => void; onSelectPort: (dev: number, port: number) => void; onEmptyClick: (u: number) => void; onDropTemplate: (tplId: number, u: number) => void; onMoveDevice: (devId: number, u: number) => void; onConnect: (a: number, b: number) => void; onClearVlan: () => void; onKeystoneMissing: (p: Port, dev: RackDevice) => void }) {
+  onSelectDevice: (id: number | null) => void; onSelectPort: (dev: number, port: number) => void; onEmptyClick: (u: number) => void; onDropTemplate: (tplId: number, u: number) => void; onMoveDevice: (devId: number, u: number) => void; onConnect: (a: number, b: number) => void; onClearVlan: () => void; onKeystoneMissing: (p: Port, dev: RackDevice) => void; onWireToDevice: (fromPort: number, deviceId: number) => void }) {
   const svgRef = useRef<SVGSVGElement>(null);
   const H = rack.height_u * UH + PAD + PAD_TOP; const W = LEFT + RW + GUT + 20;
   const [drag, setDrag] = useState<null | { kind: 'pan'; sx: number; sy: number; v: View } | { kind: 'device'; id: number; startY: number; dy: number } | { kind: 'wire'; from: number; x: number; y: number }>(null);
@@ -135,7 +136,7 @@ function RackCanvas({ rack, face, view, setView, fitMode, selDev, selPort, canEd
     if (!drag) return;
     if (drag.kind === 'pan') { if (Math.hypot(e.clientX - drag.sx, e.clientY - drag.sy) < 3) { onSelectDevice(null); onClearVlan(); } }
     else if (drag.kind === 'device') { const d = rack.devices.find((x) => x.id === drag.id)!; const moved = Math.round(drag.dy / UH); onSelectDevice(d.id); if (moved !== 0) onMoveDevice(d.id, Math.max(1, Math.min(rack.height_u - d.height_u + 1, (d.position_u ?? 1) - moved))); }
-    else if (drag.kind === 'wire') { const el = document.elementFromPoint(e.clientX, e.clientY) as Element | null; const pid = Number(el?.closest('[data-port]')?.getAttribute('data-port') ?? 0); if (pid && pid !== drag.from) onConnect(drag.from, pid); }
+    else if (drag.kind === 'wire') { const el = document.elementFromPoint(e.clientX, e.clientY) as Element | null; const pid = Number(el?.closest('[data-port]')?.getAttribute('data-port') ?? 0); const did = Number(el?.closest('[data-device]')?.getAttribute('data-device') ?? 0); if (pid && pid !== drag.from) onConnect(drag.from, pid); else if (did && did !== geom.get(drag.from)?.dev.id) onWireToDevice(drag.from, did); }
     setDrag(null);
   };
   const dragY = (d: RackDevice) => drag?.kind === 'device' && drag.id === d.id ? drag.dy : 0;
@@ -153,7 +154,7 @@ function RackCanvas({ rack, face, view, setView, fitMode, selDev, selPort, canEd
         {!occ && <g style={{ cursor: canEdit ? 'pointer' : 'default' }} onPointerDown={(e) => e.stopPropagation()} onClick={() => onEmptyClick(u)}><rect x={LEFT + RAIL} y={y} width={RW - RAIL * 2} height={UH} fill="transparent" /><line x1={LEFT + RAIL} x2={LEFT + RW - RAIL} y1={y + UH} y2={y + UH} stroke="var(--border)" strokeWidth={0.5} />{canEdit && <g opacity={0.5}><circle cx={LEFT + RW / 2} cy={y + UH / 2} r={6} fill="none" stroke="var(--primary)" strokeWidth={1} /><text x={LEFT + RW / 2} y={y + UH / 2 + 3.5} fontSize={10} textAnchor="middle" fill="var(--primary)">+</text></g>}<title>{canEdit ? `Add device at U${u}` : `U${u} empty`}</title></g>}
       </g>; })}
       {rack.devices.map((d) => { const top = yOfTop((d.position_u ?? 1) + d.height_u - 1) + dragY(d); const h = d.height_u * UH; const active = selDev === d.id; const tpl = d.template_name ?? d.type_name;
-        return <g key={d.id} transform={`translate(0 ${top})`} style={{ cursor: canEdit ? 'grab' : 'pointer' }} onPointerDown={(e) => { e.stopPropagation(); if (!canEdit) { onSelectDevice(d.id); return; } setDrag({ kind: 'device', id: d.id, startY: e.clientY, dy: 0 }); (e.currentTarget as Element).setPointerCapture?.(e.pointerId); }} onPointerUp={(e) => { if (drag?.kind === 'device') { e.stopPropagation(); onUp(e as unknown as RPointerEvent<SVGSVGElement>); } else if (!canEdit) onSelectDevice(d.id); }}>
+        return <g key={d.id} data-device={d.id} transform={`translate(0 ${top})`} style={{ cursor: canEdit ? 'grab' : 'pointer' }} onPointerDown={(e) => { e.stopPropagation(); if (!canEdit) { onSelectDevice(d.id); return; } setDrag({ kind: 'device', id: d.id, startY: e.clientY, dy: 0 }); (e.currentTarget as Element).setPointerCapture?.(e.pointerId); }} onPointerUp={(e) => { if (drag?.kind === 'device') { e.stopPropagation(); onUp(e as unknown as RPointerEvent<SVGSVGElement>); } else if (!canEdit) onSelectDevice(d.id); }}>
           <rect x={LEFT + RAIL + 1} y={1} width={RW - RAIL * 2 - 2} height={h - 2} rx={2} fill="var(--surface)" stroke={active ? 'var(--primary)' : 'var(--border-strong)'} strokeWidth={active ? 2 : 1} opacity={drag?.kind === 'device' && drag.id === d.id ? 0.75 : 1} />
           <rect x={LEFT + RAIL + 1} y={1} width={30} height={h - 2} fill="var(--surface-2)" />
           <text transform={`translate(${LEFT + RAIL + 16} ${h / 2}) rotate(-90)`} fontSize={h > 30 ? 9 : 7.5} fontWeight={700} textAnchor="middle" fill="var(--text)" fontFamily="var(--mono)">{d.code}</text>

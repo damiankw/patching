@@ -116,32 +116,34 @@ export function PortSettings({ port, canEdit, onChanged }: { port: Port; canEdit
 }
 
 // ---------- Connection Configurator ----------
-export function ConnectionConfigurator({ device, port, onDone }: { device: DeviceDetail; port: Port; onDone: () => void }) {
+export function ConnectionConfigurator({ device, port, onDone, expandDeviceId }: { device: DeviceDetail; port: Port; onDone: () => void; expandDeviceId?: number }) {
   const tree = useQuery({ queryKey: ['tree'], queryFn: () => api.get<Tree>('/tree') });
   const [srcPort, setSrcPort] = useState(port.id);
   const [scope, setScope] = useState<{ location_id: number; floor_id: number; room_id: number | null }>({ location_id: device.location_id, floor_id: device.floor_id, room_id: device.room_id });
-  const [q, setQ] = useState(''); const [open, setOpen] = useState<number | null>(null); const [err, setErr] = useState<string | null>(null);
+  const [q, setQ] = useState(''); const [open, setOpen] = useState<number | null>(expandDeviceId ?? null); const [err, setErr] = useState<string | null>(null);
+  const [inRack, setInRack] = useState(!!device.rack_id);
   const [cable, setCable] = useState({ color: '', label: '', cable_type: '' });
   const all = q.trim().length > 0;
-  const cands = useQuery({ queryKey: ['cands', srcPort, scope, all], queryFn: () => api.get<Candidate[]>(all ? `/candidates?type=user&scope=all&port_id=${srcPort}` : `/candidates?type=user&scope=room&id=${scope.room_id ?? 0}&floor_id=${scope.floor_id}&port_id=${srcPort}`) });
+  const cands = useQuery({ queryKey: ['cands', srcPort, scope, all, inRack], queryFn: () => api.get<Candidate[]>(all ? `/candidates?type=user&scope=all&port_id=${srcPort}` : inRack && device.rack_id ? `/candidates?type=user&scope=rack&id=${device.rack_id}&port_id=${srcPort}` : `/candidates?type=user&scope=room&id=${scope.room_id ?? 0}&floor_id=${scope.floor_id}&port_id=${srcPort}`) });
   const list = (cands.data ?? []).filter((d) => !all || `${d.path} ${d.name} ${d.type_name}`.toUpperCase().includes(q.toUpperCase()));
   const floors = tree.data?.floors.filter((f) => f.location_id === scope.location_id) ?? []; const rooms = tree.data?.rooms.filter((r) => r.floor_id === scope.floor_id) ?? [];
   const connect = async (targetPortId: number) => { setErr(null); try { await api.post('/connections', { port_a_id: srcPort, port_b_id: targetPortId, type: 'user', ...cable }); onDone(); } catch (e) { setErr(errMsg(e)); } };
   const freePorts = device.ports.filter((p) => !p.user && (p.passive === 0 || p.keystone));
   return <div className="form" style={{ gap: 10 }}>
     <div className="btn-row"><span>Source port</span><select style={{ width: 120 }} value={srcPort} onChange={(e) => setSrcPort(Number(e.target.value))}>{freePorts.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}</select><span className="grow" /><div style={{ position: 'relative', width: 220 }}><Search size={13} className="muted" style={{ position: 'absolute', left: 8, top: 9 }} /><input style={{ paddingLeft: 26 }} placeholder="Search all locations…" value={q} onChange={(e) => setQ(e.target.value)} /></div></div>
-    {!all && <div className="cfg-crumbs">
+    {!all && device.rack_id && <div className="seg" style={{ alignSelf: 'flex-start' }}><button type="button" className={inRack ? 'active' : ''} onClick={() => setInRack(true)}>This rack</button><button type="button" className={!inRack ? 'active' : ''} onClick={() => setInRack(false)}>Room / floor / location</button></div>}
+    {!all && !inRack && <div className="cfg-crumbs">
       <span className="cfg-crumb"><MapPin size={12} /><select style={{ border: 0, padding: 0, width: 'auto', background: 'none' }} value={scope.location_id} onChange={(e) => { const lid = Number(e.target.value); const f = tree.data?.floors.find((x) => x.location_id === lid); setScope({ location_id: lid, floor_id: f?.id ?? 0, room_id: null }); }}>{tree.data?.locations.map((l) => <option key={l.id} value={l.id}>{l.code}</option>)}</select></span>›
       <span className="cfg-crumb"><Layers size={12} /><select style={{ border: 0, padding: 0, width: 'auto', background: 'none' }} value={scope.floor_id} onChange={(e) => setScope({ ...scope, floor_id: Number(e.target.value), room_id: null })}>{floors.map((f) => <option key={f.id} value={f.id}>{f.code}</option>)}</select></span>›
       <span className="cfg-crumb"><DoorOpen size={12} /><select style={{ border: 0, padding: 0, width: 'auto', background: 'none' }} value={scope.room_id ?? ''} onChange={(e) => setScope({ ...scope, room_id: e.target.value ? Number(e.target.value) : null })}><option value="">DEFAULT</option>{rooms.map((r) => <option key={r.id} value={r.id}>{r.code}</option>)}</select></span>
     </div>}
     <div className="cfg-list">
-      <div className="cfg-head">{all ? `Search results (${list.length})` : `Devices in room ${tree.data?.locations.find((l) => l.id === scope.location_id)?.code}/${floors.find((f) => f.id === scope.floor_id)?.code}/${rooms.find((r) => r.id === scope.room_id)?.code ?? 'DEFAULT'}`}</div>
+      <div className="cfg-head">{all ? `Search results (${list.length})` : inRack ? `Devices in rack ${device.rack_code}` : `Devices in room ${tree.data?.locations.find((l) => l.id === scope.location_id)?.code}/${floors.find((f) => f.id === scope.floor_id)?.code}/${rooms.find((r) => r.id === scope.room_id)?.code ?? 'DEFAULT'}`}</div>
       {cands.isLoading && <Loading />}
       {list.length === 0 && !cands.isLoading && <div className="muted" style={{ padding: 14 }}>No devices you can connect to here. Try another room, floor or location.</div>}
       {list.map((d) => <div key={d.id}>
-        <div className="cfg-row" onClick={() => setOpen(open === d.id ? null : d.id)}><div className="dev-ico"><DeviceIcon name={d.type_icon} size={15} /></div><div className="grow"><div><b>{d.rack_code ? `${d.rack_code} / ` : ''}{d.code}</b>{d.name && <span className="muted"> · {d.name}</span>}</div><div className="muted small">{d.type_name}{d.position_u ? ` · U${d.position_u}` : ''}{all ? ` · ${d.path}` : ''}</div></div><span className="muted small">{d.ports.filter((p) => p.available).length} free</span></div>
-        {open === d.id && <div className="cfg-ports">{d.ports.map((p) => <button key={p.id} className={`cfg-port${p.available ? '' : ' taken'}`} title={p.available ? `Connect to ${p.name}` : p.reason} disabled={!p.available} onClick={() => connect(p.id)}>{p.name}<span className="muted"> {p.kind === 'wireless' ? p.wireless_mode : PORT_KIND_LABEL[p.kind] ?? p.kind}</span></button>)}{d.ports.length === 0 && <span className="muted small">No ports</span>}</div>}
+        <div className="cfg-row" onClick={() => setOpen(open === d.id ? null : d.id)}><div className="dev-ico"><DeviceIcon name={d.type_icon} size={15} /></div><div className="grow"><div><b>{d.rack_code ? `${d.rack_code} / ` : ''}{d.code}</b>{d.name && <span className="muted"> · {d.name}</span>}</div><div className="muted small">{d.type_name}{d.position_u ? ` · U${d.position_u}` : ''}{all ? ` · ${d.path}` : ''}{d.ports.some((p) => p.face === 'rear') ? ' · has back ports' : ''}</div></div><span className="muted small">{d.ports.filter((p) => p.available).length} free</span></div>
+        {open === d.id && <div className="cfg-ports">{d.ports.map((p) => <button key={p.id} className={`cfg-port${p.available ? '' : ' taken'}`} title={p.available ? `Connect to ${p.name}` : p.reason} disabled={!p.available} onClick={() => connect(p.id)}>{p.name}<span className="muted"> {p.kind === 'wireless' ? p.wireless_mode : PORT_KIND_LABEL[p.kind] ?? p.kind}{p.face === 'rear' ? ' · back' : ''}</span></button>)}{d.ports.length === 0 && <span className="muted small">No ports</span>}</div>}
       </div>)}
     </div>
     <details><summary className="muted small" style={{ cursor: 'pointer' }}>Cable details (optional)</summary><div className="form-row-3" style={{ marginTop: 8 }}><Field label="Cable type"><input value={cable.cable_type} onChange={(e) => setCable({ ...cable, cable_type: e.target.value })} placeholder="Cat6a, OM4…" /></Field><Field label="Label"><input value={cable.label} onChange={(e) => setCable({ ...cable, label: e.target.value })} /></Field><Field label="Colour"><input type="color" value={cable.color || '#2563eb'} onChange={(e) => setCable({ ...cable, color: e.target.value })} /></Field></div></details>
